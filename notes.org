@@ -1,0 +1,5 @@
+#+title: Notes
+
+
+* “low-spoons mode”
+Have chatgpt do a more casual conversation style. 
