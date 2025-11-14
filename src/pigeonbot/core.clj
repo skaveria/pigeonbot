@@ -11,16 +11,50 @@
 (defn load-config []
   (-> "config.edn" slurp edn/read-string))
 
-;; --- event handling ---------------------------------------------------------
+(defn media-file [filename]
+  (java.io.File. (str "src/pigeonbot/media/" filename)))
 
-(defn handle-event
-  [event-type event-data]
+;; --- commands ---------------------------------------------------------------
+(def command-descriptions
+  {"!ping" "Replies with pong."
+   "!help" "Shows this help message."
+   "!odinthewise" "Nothing is more important than looking cool."})
+
+(defn cmd-ping [{:keys [channel-id]}]
+  (m/create-message! (:messaging @state)
+                     channel-id
+                     :content "pong"))
+
+(defn cmd-help [{:keys [channel-id]}]
+  (let [help-text (->> command-descriptions
+                       (map (fn [[cmd desc]] (str cmd " — " desc)))
+                       (clojure.string/join "\n"))]
+    (m/create-message! (:messaging @state)
+                       channel-id
+                       :content help-text)))
+
+(defn cmd-odinthewise [{:keys [channel-id]}]
+  (m/create-message! (:messaging @state)
+                     channel-id
+                     :content ""
+                     :file (media-file "odinthewise.png")))
+
+
+(def commands
+  {"!ping"       cmd-ping
+   "!help"       cmd-help
+   "!odinthewise" cmd-odinthewise})
+
+(defn handle-message [{:keys [content] :as msg}]
+  (when-let [cmd-fn (commands content)]
+    (cmd-fn msg)))
+
+
+;; --- event routing ----------------------------------------------------------
+
+(defn handle-event [event-type event-data]
   (when (= event-type :message-create)
-    (let [{:keys [content channel-id]} event-data]
-      (when (= content "!ping")
-        (m/create-message! (:messaging @state)
-                           channel-id
-                           :content "pong")))))
+    (handle-message event-data)))
 
 ;; --- lifecycle --------------------------------------------------------------
 

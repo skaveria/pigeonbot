@@ -3,3 +3,6 @@
 
 * “low-spoons mode”
 Have chatgpt do a more casual conversation style. 
+
+* Init pigeonbot
+clj -M -m pigeonbot.core
