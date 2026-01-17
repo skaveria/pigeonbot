@@ -59,6 +59,16 @@
   (when-let [cmd-fn (commands content)]
     (cmd-fn msg)))
 
+(defn echo!
+  "Send a message to a channel from the REPL.
+   channel-id: Discord channel ID (long)
+   text: string content"
+  [channel-id text]
+  (when-let [messaging (:messaging @state)]
+    (m/create-message! messaging
+                       channel-id
+                       :content text)))
+
 ;; -----------------------------------------------------------------------------
 ;; Event routing & lifecycle
 ;; -----------------------------------------------------------------------------
@@ -79,19 +89,25 @@
     (println "Connected to Discord (waiting for events)…")
     (e/message-pump! event-ch handle-event)))
 
+(def bot-future (atom nil))
+
 (defn start-bot!
   "Starts the bot in the background and returns the messaging handle
    for convenient use at the REPL."
   []
-  (future (start-bot))
+  (reset! bot-future
+          (future
+            (try
+              (start-bot)
+              (catch Throwable t
+                (println "start-bot crashed:" (.getMessage t))
+                (.printStackTrace t)))))
   ;; wait briefly for :messaging to appear in state
   (loop [tries 0]
     (if-let [msg (:messaging @state)]
       msg
       (if (< tries 20)
-        (do
-          (Thread/sleep 250)
-          (recur (inc tries)))
+        (do (Thread/sleep 250) (recur (inc tries)))
         (do
           (println "start-bot!: timed out waiting for messaging connection.")
           nil)))))
