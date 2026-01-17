@@ -22,6 +22,18 @@
 (defn media-file [filename]
   (java.io.File. (str "src/pigeonbot/media/" filename)))
 
+(defn send!
+  "Safely send a Discord message. Returns a channel or nil.
+   Prevents crashes when the bot isn't fully connected yet."
+  [channel-id & {:keys [content file] :or {content ""}}]
+  (if-let [messaging (:messaging @state)]
+    (m/create-message! messaging
+                       channel-id
+                       :content content
+                       :file file)
+    (do
+      (println "send!: messaging connection is nil (bot not ready?)")
+      nil)))
 ;; -----------------------------------------------------------------------------
 ;; Commands
 ;; -----------------------------------------------------------------------------
@@ -50,9 +62,17 @@
                      :content ""
                      :file (media-file "odinthewise.png")))
 
+(defn cmd-partycat [{:keys [channel-id]}]
+  (m/create-message! (:messaging @state)
+                     channel-id
+                     :content ""
+                     :file (media-file "partycat.png")))
+
 (def commands
   {"!ping"        cmd-ping
    "!help"        cmd-help
+   "!partycat"    cmd-partycat
+
    "!odinthewise" cmd-odinthewise})
 
 (defn handle-message [{:keys [content] :as msg}]
