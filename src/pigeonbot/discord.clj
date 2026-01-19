@@ -5,6 +5,7 @@
             [discljord.events :as e]
             [discljord.messaging :as m]
             [pigeonbot.commands :as commands]
+            [discljord.presence :as p]
             [pigeonbot.config :as config]
             [pigeonbot.state :refer [state]]))
 
@@ -12,18 +13,27 @@
   (when (= event-type :message-create)
     (commands/handle-message event-data)))
 
+
 (defn start-bot
   "Connect to Discord and start the event pump (blocking)."
   []
   (let [{:keys [token]} (config/load-config)
         event-ch (a/chan 100)
-        conn-ch  (c/connect-bot! token event-ch
+        conn     (c/connect-bot! token event-ch
                                  :intents #{:guilds :guild-messages})
         msg-ch   (m/start-connection! token)]
-    (reset! state {:connection conn-ch
+
+    (p/update-presence!
+     conn
+     {:status :online
+      :activities [{:name "you closely"
+                     :type :watching}]})
+
+    (reset! state {:connection conn
                    :events     event-ch
                    :messaging  msg-ch})
-    (println "Connected to Discord (waiting for events)…")
+
+    (println "Connected to Discord (online)")
     (e/message-pump! event-ch handle-event)))
 
 (def bot-future (atom nil))

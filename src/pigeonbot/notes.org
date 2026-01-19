@@ -1,7 +1,7 @@
 #+title: Notes
 
 * TODO
-- [ ] Split core.clj into seperate files
+- [X] Split core.clj into seperate files
 - [ ] make a key:value map of channel names and ID's
 - [ ] get pigeon to manage roles
 - [X] deploy pigeon on dedicated server
