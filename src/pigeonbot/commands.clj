@@ -52,7 +52,6 @@
    "!partycat"    cmd-partycat
    "!wimdy"       cmd-wimdy
    "!odinthewise" cmd-odinthewise
-   "!here"        cmd-here
    })
 
 (defn handle-message [{:keys [content] :as msg}]
@@ -60,33 +59,6 @@
     (when-let [cmd-fn (commands cmd)]
       (cmd-fn msg))))
 
-(defn cmd-here
-  "Usage: !here friendly-name
-   Example: !here general"
-  [{:keys [channel-id content]}]
-  (let [[_ friendly] (str/split (or content "") #"\s+" 2)]
-    (if (seq (str/trim (or friendly "")))
-      (let [{:keys [name id]} (chans/remember-channel! friendly channel-id)]
-        (send! channel-id :content (str "Saved " name " => " id)))
-      (send! channel-id :content "Usage: !here <friendly-name>"))))
-
-(defn cmd-channels [{:keys [channel-id]}]
-  (let [rows (chans/list-channels)
-        txt  (if (seq rows)
-               (->> rows
-                    (map (fn [[k v]] (str k " => " v)))
-                    (str/join "\n"))
-               "(no channels saved yet)")]
-    (send! channel-id :content txt)))
-
-(defn cmd-roles [{:keys [channel-id]}]
-  (let [ids (roles/list-roles)]
-    (send! channel-id
-           :content
-           (if (seq ids)
-             (str "Self-assignable role IDs:\n"
-                  (clojure.string/join "\n" ids))
-             "No self-assignable roles configured."))))
 
 (defn cmd-role-add [{:keys [channel-id guild-id author content]}]
   (let [[_ _ role-id] (clojure.string/split (or content "") #"\s+" 3)
