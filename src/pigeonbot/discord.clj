@@ -2,6 +2,7 @@
   (:require [clojure.core.async :as a]
             [discljord.connections :as c]
             [discljord.events :as e]
+            [pigeonbot.reaction-roles :as rr]
             [discljord.messaging :as m]
             [pigeonbot.commands :as commands]
             [pigeonbot.config :as config]
@@ -11,28 +12,17 @@
 
 (defonce seen-events* (atom #{}))
 
-(defn handle-event
-  [event-type event-data]
-
-  ;; Log each event type once, for gateway visibility/debugging
-  (when-not (contains? @seen-events* event-type)
-    (swap! seen-events* conj event-type)
-    (println "EVENT TYPE:" event-type
-             "keys:" (when (map? event-data)
-                       (-> event-data keys sort vec))))
-
+(defn handle-event [event-type event-data]
   (case event-type
     :message-create
-    (do
-      ;; TEMP DEBUG: confirm message content is arriving
-      (println "MESSAGE-CREATE:"
-               "content =" (pr-str (:content event-data))
-               "channel =" (:channel-id event-data)
-               "author =" (get-in event-data [:author :id]))
+    (commands/handle-message event-data)
 
-      (commands/handle-message event-data))
+    :message-reaction-add
+    (rr/handle-reaction-add! event-data)
 
-    ;; ignore everything else for now
+    :message-reaction-remove
+    (rr/handle-reaction-remove! event-data)
+
     nil))
 
 (defn start-bot
@@ -43,6 +33,7 @@
         conn     (c/connect-bot! token event-ch
                 :intents #{:guilds
                            :guild-messages
+                           :guild-message-reactions
                            :message-content})
         msg-ch   (m/start-connection! token)]
 
