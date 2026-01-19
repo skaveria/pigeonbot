@@ -12,7 +12,7 @@
 
 (def reaction-role-id
   "Role to grant/revoke."
-  1462911178777825505)
+  1462910582582935583)
 
 (def reaction-emoji-names
   "Emoji names to accept.
