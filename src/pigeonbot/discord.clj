@@ -10,18 +10,34 @@
             [pigeonbot.state :refer [state]]))
 
 
+
 (defonce seen-events* (atom #{}))
 
-(defn handle-event [event-type event-data]
+(defn handle-event
+  [event-type event-data]
+
+  ;; log each event type once (helps discover correct keywords)
+  (when-not (contains? @seen-events* event-type)
+    (swap! seen-events* conj event-type)
+    (println "EVENT TYPE:" event-type
+             "keys:" (when (map? event-data)
+                       (-> event-data keys sort vec))))
+
   (case event-type
     :message-create
     (commands/handle-message event-data)
 
     :message-reaction-add
-    (rr/handle-reaction-add! event-data)
+    (do
+      (println "REACTION-ADD raw:"
+               (select-keys event-data [:guild-id :channel-id :message-id :user-id :emoji]))
+      (rr/handle-reaction-add! event-data))
 
     :message-reaction-remove
-    (rr/handle-reaction-remove! event-data)
+    (do
+      (println "REACTION-REMOVE raw:"
+               (select-keys event-data [:guild-id :channel-id :message-id :user-id :emoji]))
+      (rr/handle-reaction-remove! event-data))
 
     nil))
 
