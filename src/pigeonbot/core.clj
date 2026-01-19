@@ -68,11 +68,16 @@
                      :content ""
                      :file (media-file "partycat.png")))
 
+(defn cmd-wimdy [{:keys [channel-id]}]
+  (m/create-message! (:messaging @state)
+                     channel-id
+                     :content ""
+                     :file (media-file "wimdy.gif")))
 (def commands
   {"!ping"        cmd-ping
    "!help"        cmd-help
    "!partycat"    cmd-partycat
-
+   "!wimdy"       cmd-wimdy
    "!odinthewise" cmd-odinthewise})
 
 (defn handle-message [{:keys [content] :as msg}]
@@ -117,20 +122,42 @@
   []
   (reset! bot-future
           (future
-            (try
-              (start-bot)
-              (catch Throwable t
-                (println "start-bot crashed:" (.getMessage t))
-                (.printStackTrace t)))))
+            (start-bot)))
   ;; wait briefly for :messaging to appear in state
   (loop [tries 0]
     (if-let [msg (:messaging @state)]
       msg
       (if (< tries 20)
-        (do (Thread/sleep 250) (recur (inc tries)))
+        (do
+          (Thread/sleep 250)
+          (recur (inc tries)))
         (do
           (println "start-bot!: timed out waiting for messaging connection.")
           nil)))))
+
+
+(defn stop-bot!
+  "Best-effort stop of the running bot."
+  []
+  (when-let [{:keys [events connection messaging]} @state]
+    (when events
+      (a/close! events))
+    ;; discljord connections will usually stop when channels close
+    (println "Stopping bot connections…"))
+  (when-let [f @bot-future]
+    (future-cancel f))
+  (reset! bot-future nil)
+  (reset! state nil)
+  (println "Bot stopped."))
+
+(defn restart-bot!
+  "Restart the Discord bot cleanly from the REPL."
+  []
+  (println "Restarting pigeonbot…")
+  (stop-bot!)
+  ;; give async systems a moment to breathe
+  (Thread/sleep 500)
+  (start-bot!))
 
 (defn -main [& _args]
   (start-bot))

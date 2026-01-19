@@ -1,0 +1,6 @@
+#+title: Notes
+
+* TODO
+- [ ] Split core.clj into seperate files
+- [ ] make a key:value map of channel names and ID's
+- [ ] get pigeon to manage roles
