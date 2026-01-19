@@ -1,6 +1,7 @@
 (ns pigeonbot.commands
   (:require [clojure.string :as str]
             [discljord.messaging :as m]
+            [pigeonbot.channels :as chans]
             [pigeonbot.state :refer [state]]))
 
 (defn media-file [filename]
@@ -49,10 +50,30 @@
    "!help"        cmd-help
    "!partycat"    cmd-partycat
    "!wimdy"       cmd-wimdy
-   "!odinthewise" cmd-odinthewise})
+   "!odinthewise" cmd-odinthewise
+   "!here"        cmd-here
+   "!channels"    cmd-channels})
 
-(defn handle-message
-  "Dispatch a message-create payload to a command, if it matches exactly."
-  [{:keys [content] :as msg}]
-  (when-let [cmd-fn (commands content)]
-    (cmd-fn msg)))
+(defn handle-message [{:keys [content] :as msg}]
+  (let [cmd (first (str/split (or content "") #"\s+"))]
+    (when-let [cmd-fn (commands cmd)]
+      (cmd-fn msg))))
+
+(defn cmd-here
+  "Usage: !here friendly-name
+   Example: !here general"
+  [{:keys [channel-id content]}]
+  (let [[_ friendly] (str/split (or content "") #"\s+" 2)]
+    (if (seq (str/trim (or friendly "")))
+      (let [{:keys [name id]} (chans/remember-channel! friendly channel-id)]
+        (send! channel-id :content (str "Saved " name " => " id)))
+      (send! channel-id :content "Usage: !here <friendly-name>"))))
+
+(defn cmd-channels [{:keys [channel-id]}]
+  (let [rows (chans/list-channels)
+        txt  (if (seq rows)
+               (->> rows
+                    (map (fn [[k v]] (str k " => " v)))
+                    (str/join "\n"))
+               "(no channels saved yet)")]
+    (send! channel-id :content txt)))

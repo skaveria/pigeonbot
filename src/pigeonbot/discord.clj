@@ -5,6 +5,7 @@
             [discljord.messaging :as m]
             [pigeonbot.commands :as commands]
             [pigeonbot.config :as config]
+            [pigeonbot.channels :as chans]
             [pigeonbot.state :refer [state]]))
 
 (defn handle-event [event-type event-data]
@@ -28,6 +29,7 @@
                    :messaging  msg-ch})
 
     (println "Connected to Discord (online)")
+    (chans/load-channels)
     (e/message-pump! event-ch handle-event)))
 
 (def bot-future (atom nil))
