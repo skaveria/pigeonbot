@@ -41,7 +41,9 @@
   (let [{:keys [token]} (config/load-config)
         event-ch (a/chan 100)
         conn     (c/connect-bot! token event-ch
-                                 :intents #{:guilds :guild-messages})
+                :intents #{:guilds
+                           :guild-messages
+                           :message-content})
         msg-ch   (m/start-connection! token)]
 
     ;; ✅ minimal: just go green
