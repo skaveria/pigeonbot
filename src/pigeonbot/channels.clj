@@ -12,7 +12,18 @@
   (atom {:by-name {} :by-id {}}))
 
 (defn- normalize-name [s]
-  (-> s str/trim str/lower-case (str/replace #"[^a-z0-9_\-]" "-") keyword))
+  (let [raw (-> (or s "")
+                str
+                str/trim
+                str/lower-case)
+        ;; replace non-friendly chars with dashes, collapse repeats
+        cooked (-> raw
+                   (str/replace #"[^a-z0-9]+" "-")
+                   (str/replace #"^-+" "")
+                   (str/replace #"-+$" "")
+                   (str/replace #"-{2,}" "-"))]
+    (when (seq cooked)
+      (keyword cooked))))
 
 (defn load-channels!
   "Load channels.edn if it exists."
@@ -31,24 +42,46 @@
 (defn remember-channel!
   "Remember a friendly name for a channel-id."
   [friendly channel-id]
-  (let [k (normalize-name friendly)
-        id (long channel-id)]
-    (swap! channels*
-           (fn [{:keys [by-name by-id] :as m}]
-             ;; If either side already existed, clean up old inverse links
-             (let [old-id   (get by-name k)
-                   old-name (get by-id id)
-                   by-name' (cond-> by-name
-                              old-id (dissoc k)
-                              old-name (dissoc old-name)
-                              true (assoc k id))
-                   by-id'   (cond-> by-id
-                              old-id (dissoc old-id)
-                              old-name (dissoc id)
-                              true (assoc id k))]
-               (assoc m :by-name by-name' :by-id by-id'))))
+  (if-let [k (normalize-name friendly)]
+    (let [id (long channel-id)]
+      (swap! channels*
+             (fn [{:keys [by-name by-id] :as m}]
+               (let [old-id   (get by-name k)
+                     old-name (get by-id id)
+                     by-name' (cond-> by-name
+                                old-id (dissoc k)
+                                old-name (dissoc old-name)
+                                true (assoc k id))
+                     by-id'   (cond-> by-id
+                                old-id (dissoc old-id)
+                                old-name (dissoc id)
+                                true (assoc id k))]
+                 (assoc m :by-name by-name' :by-id by-id'))))
+      (save-channels!)
+      {:name k :id id})
+    (do
+      (println "remember-channel!: invalid friendly name:" (pr-str friendly))
+      nil)))
+
+(defn repair-channels!
+  "Cleans invalid keys/values from channels* and rewrites channels.edn.
+   - drops :by-name entries with invalid keywords
+   - drops :by-id entries that don't point to a valid keyword
+   - rebuilds :by-id from :by-name to ensure consistency"
+  []
+  (let [{:keys [by-name]} @channels*
+        by-name' (into {}
+                       (keep (fn [[k v]]
+                               (when (and (keyword? k)
+                                          (re-matches #"[a-z0-9]+(-[a-z0-9]+)*" (name k))
+                                          (integer? v))
+                                 [k v])))
+                       by-name)
+        by-id'   (into {} (map (fn [[k v]] [v k])) by-name')
+        fixed    {:by-name by-name' :by-id by-id'}]
+    (reset! channels* fixed)
     (save-channels!)
-    {:name k :id id}))
+    fixed))
 
 (defn id
   "Get channel id by friendly name keyword (ex: :general)."
