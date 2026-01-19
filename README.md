@@ -1,3 +1,3 @@
 # pigeonbot
 
-* Ask now for whom the pigeon coos.
+* Ask not for whom the pigeon coos.
