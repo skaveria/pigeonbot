@@ -4,10 +4,20 @@
             [pigeonbot.state :refer [state]]))
 
 (defn allowed-role-ids
+  "Return a set of role IDs (longs) that are self-assignable.
+   Accepts numbers or numeric strings in config.edn."
   []
-  (->> (get (config/load-config) :self-role-ids [])
-       (map long)
-       set))
+  (let [ids (get (config/load-config) :self-role-ids [])]
+    (->> ids
+         (keep (fn [x]
+                 (cond
+                   (integer? x) (long x)
+                   (number? x)  (long x)
+                   (string? x)  (try
+                                  (Long/parseLong (clojure.string/trim x))
+                                  (catch Throwable _ nil))
+                   :else nil)))
+         set)))
 
 (defn list-roles
   "Return allowed self-assignable role IDs."
