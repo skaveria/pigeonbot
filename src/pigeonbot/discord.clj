@@ -1,11 +1,9 @@
-
 (ns pigeonbot.discord
   (:require [clojure.core.async :as a]
             [discljord.connections :as c]
             [discljord.events :as e]
             [discljord.messaging :as m]
             [pigeonbot.commands :as commands]
-            [discljord.presence :as p]
             [pigeonbot.config :as config]
             [pigeonbot.state :refer [state]]))
 
