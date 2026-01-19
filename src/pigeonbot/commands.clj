@@ -55,12 +55,13 @@
    "!here"        cmd-here
    "!channels"    cmd-channels
    "!roles" cmd-roles
-   "!role"  (fn [msg]
-              (let [[_ subcmd _] (str/split (or (:content msg) "") #"\s+" 3)]
-                (case subcmd
-                  "add"    (cmd-role-add msg)
-                  "remove" (cmd-role-remove msg)
-                  (send! (:channel-id msg) :content "Usage: !role add|remove <role-name>"))))
+   "!role" (fn [msg]
+     (let [[_ subcmd] (clojure.string/split (or (:content msg) "") #"\s+" 3)]
+       (case subcmd
+         "add"    (cmd-role-add msg)
+         "remove" (cmd-role-remove msg)
+         (send! (:channel-id msg)
+                :content "Usage: !role add|remove <ROLE_ID>"))))
 
    })
 
@@ -89,44 +90,36 @@
     (send! channel-id :content txt)))
 
 (defn cmd-roles [{:keys [channel-id]}]
-  (let [allowed (roles/allowed-role-names)
-        txt (if (seq allowed)
-              (str "Self-assignable roles:\n"
-                   (->> allowed (map name) sort (str/join ", ")))
-              "No self-assignable roles configured.")]
-    (send! channel-id :content txt)))
+  (let [ids (roles/list-roles)]
+    (send! channel-id
+           :content
+           (if (seq ids)
+             (str "Self-assignable role IDs:\n"
+                  (clojure.string/join "\n" ids))
+             "No self-assignable roles configured."))))
 
 (defn cmd-role-add [{:keys [channel-id guild-id author content]}]
-  (let [[_ _ role] (str/split (or content "") #"\s+" 3)
-        user-id (some-> author :id)]
-    (if (and guild-id user-id (seq (str/trim (or role ""))))
-      (do
-        ;; ensure cache exists; if not, refresh first
-        (a/go
-          (when-not (a/<! (roles/ensure-roles! guild-id))
-            (send! channel-id :content "Role cache refresh failed (try again)."))
-          (let [{:keys [ok? reason role]} (roles/add-role! guild-id user-id role)]
-            (send! channel-id
-                   :content (case reason
-                              "not-allowed" (str "That role isn’t self-assignable: " role)
-                              "unknown-role" (str "I can’t find that role in this server: " role)
-                              "bad-role-name" "Bad role name."
-                              (if ok? "Role added ✅" "Couldn’t add role."))))))
-      (send! channel-id :content "Usage: !role add <role-name>"))))
+  (let [[_ _ role-id] (clojure.string/split (or content "") #"\s+" 3)
+        user-id (get-in author [:id])]
+    (if (and guild-id user-id role-id)
+      (let [{:keys [ok? reason]} (roles/add-role! guild-id user-id role-id)]
+        (send! channel-id
+               :content
+               (case reason
+                 :not-allowed "That role is not self-assignable."
+                 :no-messaging "Bot is not ready."
+                 (if ok? "Role added ✅" "Failed to add role."))))
+      (send! channel-id :content "Usage: !role add <ROLE_ID>"))))
 
 (defn cmd-role-remove [{:keys [channel-id guild-id author content]}]
-  (let [[_ _ role] (str/split (or content "") #"\s+" 3)
-        user-id (some-> author :id)]
-    (if (and guild-id user-id (seq (str/trim (or role ""))))
-      (do
-        (a/go
-          (when-not (a/<! (roles/ensure-roles! guild-id))
-            (send! channel-id :content "Role cache refresh failed (try again)."))
-          (let [{:keys [ok? reason role]} (roles/remove-role! guild-id user-id role)]
-            (send! channel-id
-                   :content (case reason
-                              "not-allowed" (str "That role isn’t self-assignable: " role)
-                              "unknown-role" (str "I can’t find that role in this server: " role)
-                              "bad-role-name" "Bad role name."
-                              (if ok? "Role removed ✅" "Couldn’t remove role."))))))
-      (send! channel-id :content "Usage: !role remove <role-name>"))))
+  (let [[_ _ role-id] (clojure.string/split (or content "") #"\s+" 3)
+        user-id (get-in author [:id])]
+    (if (and guild-id user-id role-id)
+      (let [{:keys [ok? reason]} (roles/remove-role! guild-id user-id role-id)]
+        (send! channel-id
+               :content
+               (case reason
+                 :not-allowed "That role is not self-assignable."
+                 :no-messaging "Bot is not ready."
+                 (if ok? "Role removed ✅" "Failed to remove role."))))
+      (send! channel-id :content "Usage: !role remove <ROLE_ID>"))))
