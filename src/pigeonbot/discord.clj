@@ -20,10 +20,8 @@
                                  :intents #{:guilds :guild-messages})
         msg-ch   (m/start-connection! token)]
 
-    ;; ✅ ABSOLUTE MINIMUM PRESENCE UPDATE
-    (c/status-update!
-     conn
-     :status :online)
+    ;; ✅ minimal: just go green
+    (c/status-update! conn :status :online :shards :all)
 
     (reset! state {:connection conn
                    :events     event-ch
@@ -46,22 +44,41 @@
     (if-let [msg (:messaging @state)]
       msg
       (if (< tries 20)
-        (do
-          (Thread/sleep 250)
-          (recur (inc tries)))
+        (do (Thread/sleep 250)
+            (recur (inc tries)))
         (do
           (println "start-bot!: timed out waiting for messaging connection.")
           nil)))))
 
 (defn stop-bot!
-  "Best-effort stop of the running bot."
+  "Best-effort stop of the running bot.
+   Explicitly disconnects gateway + messaging to avoid zombie threads."
   []
-  (when-let [{:keys [events]} @state]
+  (let [{:keys [events connection messaging]} @state]
+    (println "Stopping bot connections…")
+
+    ;; Stop accepting events first.
     (when events
       (a/close! events))
-    (println "Stopping bot connections…"))
+
+    ;; Hard disconnect gateway websocket (stops the event stream).
+    (when connection
+      (try
+        (c/disconnect-bot! connection)
+        (catch Throwable t
+          (println "stop-bot!: disconnect-bot! failed:" (.getMessage t)))))
+
+    ;; Stop messaging connection thread(s).
+    (when messaging
+      (try
+        (m/stop-connection! messaging)
+        (catch Throwable t
+          (println "stop-bot!: stop-connection! failed:" (.getMessage t))))))
+
+  ;; Cancel the background future (if it’s still running).
   (when-let [f @bot-future]
     (future-cancel f))
+
   (reset! bot-future nil)
   (reset! state nil)
   (println "Bot stopped."))
