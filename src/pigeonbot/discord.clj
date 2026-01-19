@@ -8,9 +8,18 @@
             [pigeonbot.channels :as chans]
             [pigeonbot.state :refer [state]]))
 
+
+(defonce seen-events* (atom #{}))
+
 (defn handle-event [event-type event-data]
-  (when (= event-type :message-create)
-    (commands/handle-message event-data)))
+  (when-not (contains? @seen-events* event-type)
+    (swap! seen-events* conj event-type)
+    (println "EVENT TYPE:" event-type
+             "keys:" (when (map? event-data) (-> event-data keys sort vec))))
+  ;; keep current behavior
+  (case event-type
+    :message-create (commands/handle-message event-data)
+    nil))
 
 (defn start-bot
   "Connect to Discord and start the event pump (blocking)."
