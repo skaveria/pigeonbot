@@ -7,8 +7,7 @@
 
 (def channels-path "channels.edn")
 
-(defonce ^{:doc "Registry: {:by-name {:general 123} :by-id {123 :general}}"}
-  channels*
+(defonce channels*
   (atom {:by-name {} :by-id {}}))
 
 (defn- normalize-name [s]
@@ -16,7 +15,6 @@
                 str
                 str/trim
                 str/lower-case)
-        ;; replace non-friendly chars with dashes, collapse repeats
         cooked (-> raw
                    (str/replace #"[^a-z0-9]+" "-")
                    (str/replace #"^-+" "")
@@ -63,35 +61,8 @@
       (println "remember-channel!: invalid friendly name:" (pr-str friendly))
       nil)))
 
-(defn repair-channels!
-  "Cleans invalid keys/values from channels* and rewrites channels.edn.
-   - drops :by-name entries with invalid keywords
-   - drops :by-id entries that don't point to a valid keyword
-   - rebuilds :by-id from :by-name to ensure consistency"
-  []
-  (let [{:keys [by-name]} @channels*
-        by-name' (into {}
-                       (keep (fn [[k v]]
-                               (when (and (keyword? k)
-                                          (re-matches #"[a-z0-9]+(-[a-z0-9]+)*" (name k))
-                                          (integer? v))
-                                 [k v])))
-                       by-name)
-        by-id'   (into {} (map (fn [[k v]] [v k])) by-name')
-        fixed    {:by-name by-name' :by-id by-id'}]
-    (reset! channels* fixed)
-    (save-channels!)
-    fixed))
-
-(defn id
-  "Get channel id by friendly name keyword (ex: :general)."
-  [friendly]
+(defn id [friendly]
   (get-in @channels* [:by-name (keyword friendly)]))
-
-(defn name
-  "Get friendly name keyword by channel id."
-  [channel-id]
-  (get-in @channels* [:by-id (long channel-id)]))
 
 (defn list-channels []
   (->> (get @channels* :by-name)
@@ -106,3 +77,34 @@
       (m/create-message! messaging channel-id :content (str text))
       (do (println "channels/send!: messaging is nil") nil))
     (do (println "channels/send!: unknown channel" friendly) nil)))
+
+;; -----------------------------------------------------------------------------
+;; Boot-time learning from Discord gateway payloads
+;; -----------------------------------------------------------------------------
+
+(defn- channel-friendly
+  "Build a stable friendly keyword from guild + channel names.
+   Example: \"My Server\" + \"general\" -> :my-server--general"
+  [guild-name channel-name]
+  (let [g (some-> guild-name normalize-name name)
+        c (some-> channel-name normalize-name name)]
+    (when (and (seq g) (seq c))
+      (keyword (str g "--" c)))))
+
+(defn learn-channel!
+  "Learn a single channel from gateway event data.
+   Accepts optional guild-name; if present, stores :guild--channel form."
+  [{:keys [id name] :as _channel} guild-name]
+  (when-let [friendly (or (channel-friendly guild-name name)
+                          (normalize-name name))]
+    (remember-channel! (name friendly) id)))
+
+(defn learn-guild!
+  "Learn all channels from a :guild-create event payload.
+   Expects guild map containing :name and :channels."
+  [{:keys [name channels] :as _guild}]
+  (when (seq channels)
+    (doseq [ch channels]
+      (learn-channel! ch name))
+    (save-channels!))
+  true)
