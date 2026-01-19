@@ -7,10 +7,8 @@
 
 (def channels-path "channels.edn")
 
-(defonce channels*
-  "Registry:
-   {:by-name {:general 123 ...}
-    :by-id   {123 :general ...}}"
+(defonce ^{:doc "Registry: {:by-name {:general 123} :by-id {123 :general}}"}
+  channels*
   (atom {:by-name {} :by-id {}}))
 
 (defn- normalize-name [s]
