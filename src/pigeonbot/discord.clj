@@ -11,14 +11,28 @@
 
 (defonce seen-events* (atom #{}))
 
-(defn handle-event [event-type event-data]
+(defn handle-event
+  [event-type event-data]
+
+  ;; Log each event type once, for gateway visibility/debugging
   (when-not (contains? @seen-events* event-type)
     (swap! seen-events* conj event-type)
     (println "EVENT TYPE:" event-type
-             "keys:" (when (map? event-data) (-> event-data keys sort vec))))
-  ;; keep current behavior
+             "keys:" (when (map? event-data)
+                       (-> event-data keys sort vec))))
+
   (case event-type
-    :message-create (commands/handle-message event-data)
+    :message-create
+    (do
+      ;; TEMP DEBUG: confirm message content is arriving
+      (println "MESSAGE-CREATE:"
+               "content =" (pr-str (:content event-data))
+               "channel =" (:channel-id event-data)
+               "author =" (get-in event-data [:author :id]))
+
+      (commands/handle-message event-data))
+
+    ;; ignore everything else for now
     nil))
 
 (defn start-bot
