@@ -13,31 +13,32 @@
 
 (defonce seen-events* (atom #{}))
 
+(defonce seen-events* (atom #{}))
+
 (defn handle-event
   [event-type event-data]
-
-  ;; log each event type once (helps discover correct keywords)
+  ;; log each event type once
   (when-not (contains? @seen-events* event-type)
     (swap! seen-events* conj event-type)
-    (println "EVENT TYPE:" event-type
-             "keys:" (when (map? event-data)
-                       (-> event-data keys sort vec))))
+    (println "EVENT TYPE:" event-type))
 
+  ;; log anything reaction-related, regardless of exact keyword
+  (when (and event-type
+             (clojure.string/includes? (name event-type) "reaction"))
+    (println "REACTION-ish EVENT:" event-type
+             (select-keys event-data [:guild-id :channel-id :message-id :user-id :emoji])))
+
+  ;; now do your normal routing
   (case event-type
     :message-create
     (commands/handle-message event-data)
 
+    ;; keep these in case they *are* the right keywords
     :message-reaction-add
-    (do
-      (println "REACTION-ADD raw:"
-               (select-keys event-data [:guild-id :channel-id :message-id :user-id :emoji]))
-      (rr/handle-reaction-add! event-data))
+    (rr/handle-reaction-add! event-data)
 
     :message-reaction-remove
-    (do
-      (println "REACTION-REMOVE raw:"
-               (select-keys event-data [:guild-id :channel-id :message-id :user-id :emoji]))
-      (rr/handle-reaction-remove! event-data))
+    (rr/handle-reaction-remove! event-data)
 
     nil))
 
@@ -46,21 +47,32 @@
   []
   (let [{:keys [token]} (config/load-config)
         event-ch (a/chan 100)
-        conn    (c/connect-bot! token event-ch
-                :intents #{:guilds
-                           :guild-messages
-                           :guild-message-reactions})
-        msg-ch   (m/start-connection! token)]
 
-    ;; ✅ minimal: just go green
-    (c/status-update! conn :status :online :shards :all)
+        ;; Pick the correct reactions intent keyword for *this* Discljord build.
+        reaction-intent (or (when (contains? c/gateway-intents :guild-message-reactions)
+                              :guild-message-reactions)
+                            (when (contains? c/gateway-intents :guild-message-reaction)
+                              :guild-message-reaction)
+                            (when (contains? c/gateway-intents :guild-message-reaction-add)
+                              :guild-message-reaction-add)
+                            (when (contains? c/gateway-intents :guild-message-reaction-events)
+                              :guild-message-reaction-events))
+
+        intents (cond-> #{:guilds :guild-messages}
+                  reaction-intent (conj reaction-intent))
+
+        conn   (c/connect-bot! token event-ch :intents intents)
+        msg-ch (m/start-connection! token)]
+
+    (println "Gateway intents:" intents)
+    (when-not reaction-intent
+      (println "WARNING: Could not find a reaction intent keyword in discljord.connections/gateway-intents"))
 
     (reset! state {:connection conn
                    :events     event-ch
                    :messaging  msg-ch})
 
     (println "Connected to Discord (online)")
-    (chans/load-channels)
     (e/message-pump! event-ch handle-event)))
 
 (def bot-future (atom nil))
