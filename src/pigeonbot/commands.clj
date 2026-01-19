@@ -53,16 +53,6 @@
    "!wimdy"       cmd-wimdy
    "!odinthewise" cmd-odinthewise
    "!here"        cmd-here
-   "!channels"    cmd-channels
-   "!roles" cmd-roles
-   "!role" (fn [msg]
-     (let [[_ subcmd] (clojure.string/split (or (:content msg) "") #"\s+" 3)]
-       (case subcmd
-         "add"    (cmd-role-add msg)
-         "remove" (cmd-role-remove msg)
-         (send! (:channel-id msg)
-                :content "Usage: !role add|remove <ROLE_ID>"))))
-
    })
 
 (defn handle-message [{:keys [content] :as msg}]
