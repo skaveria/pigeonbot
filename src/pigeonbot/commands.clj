@@ -2,6 +2,7 @@
   (:require [clojure.string :as str]
             [discljord.messaging :as m]
             [pigeonbot.channels :as chans]
+            [pigeonbot.roles :as roles]
             [pigeonbot.state :refer [state]]))
 
 (defn media-file [filename]
@@ -52,7 +53,16 @@
    "!wimdy"       cmd-wimdy
    "!odinthewise" cmd-odinthewise
    "!here"        cmd-here
-   "!channels"    cmd-channels})
+   "!channels"    cmd-channels
+   "!roles" cmd-roles
+   "!role"  (fn [msg]
+              (let [[_ subcmd _] (str/split (or (:content msg) "") #"\s+" 3)]
+                (case subcmd
+                  "add"    (cmd-role-add msg)
+                  "remove" (cmd-role-remove msg)
+                  (send! (:channel-id msg) :content "Usage: !role add|remove <role-name>"))))
+
+   })
 
 (defn handle-message [{:keys [content] :as msg}]
   (let [cmd (first (str/split (or content "") #"\s+"))]
@@ -77,3 +87,46 @@
                     (str/join "\n"))
                "(no channels saved yet)")]
     (send! channel-id :content txt)))
+
+(defn cmd-roles [{:keys [channel-id]}]
+  (let [allowed (roles/allowed-role-names)
+        txt (if (seq allowed)
+              (str "Self-assignable roles:\n"
+                   (->> allowed (map name) sort (str/join ", ")))
+              "No self-assignable roles configured.")]
+    (send! channel-id :content txt)))
+
+(defn cmd-role-add [{:keys [channel-id guild-id author content]}]
+  (let [[_ _ role] (str/split (or content "") #"\s+" 3)
+        user-id (some-> author :id)]
+    (if (and guild-id user-id (seq (str/trim (or role ""))))
+      (do
+        ;; ensure cache exists; if not, refresh first
+        (a/go
+          (when-not (a/<! (roles/ensure-roles! guild-id))
+            (send! channel-id :content "Role cache refresh failed (try again)."))
+          (let [{:keys [ok? reason role]} (roles/add-role! guild-id user-id role)]
+            (send! channel-id
+                   :content (case reason
+                              "not-allowed" (str "That role isn’t self-assignable: " role)
+                              "unknown-role" (str "I can’t find that role in this server: " role)
+                              "bad-role-name" "Bad role name."
+                              (if ok? "Role added ✅" "Couldn’t add role."))))))
+      (send! channel-id :content "Usage: !role add <role-name>"))))
+
+(defn cmd-role-remove [{:keys [channel-id guild-id author content]}]
+  (let [[_ _ role] (str/split (or content "") #"\s+" 3)
+        user-id (some-> author :id)]
+    (if (and guild-id user-id (seq (str/trim (or role ""))))
+      (do
+        (a/go
+          (when-not (a/<! (roles/ensure-roles! guild-id))
+            (send! channel-id :content "Role cache refresh failed (try again)."))
+          (let [{:keys [ok? reason role]} (roles/remove-role! guild-id user-id role)]
+            (send! channel-id
+                   :content (case reason
+                              "not-allowed" (str "That role isn’t self-assignable: " role)
+                              "unknown-role" (str "I can’t find that role in this server: " role)
+                              "bad-role-name" "Bad role name."
+                              (if ok? "Role removed ✅" "Couldn’t remove role."))))))
+      (send! channel-id :content "Usage: !role remove <role-name>"))))
