@@ -6,20 +6,22 @@
 ;; Configuration (hard-coded for now, as requested)
 ;; ---------------------------------------------------------------------------
 
-(def reaction-message-id
-  "Message ID to watch for reactions."
-  1462920692671447142)
+(def reaction-rules
+  [{:message-id 1462920692671447142
+    :role-id    1462910582582935583
+    :emoji      {:name "⚔️"}
+    :label      "runescapers"}
 
-(def reaction-role-id
-  "Role to grant/revoke."
-  1462910582582935583)
+   {:message-id 1462920692671447142
+    :role-id    1462910818239779120
+    :emoji      {:name "tposs"}   ;; <- change to whatever emoji you picked
+    :label      "opossum"}
 
-(def reaction-emoji-names
-  "Emoji names to accept.
+   {:message-id 1462920692671447142
+    :role-id    1462911178777825505
+    :emoji      {:name "🫠"}   ;; <- change to whatever emoji you picked
+    :label      "silly"}])
 
-   NOTE: For standard unicode emojis, Discord sends :emoji {:name \"⚔️\"}
-   rather than a shortcode like \":crossed_swords:\"."
-  #{"⚔" "⚔️" "crossed_swords" ":crossed_swords:"})
 
 (defn- to-long [x]
   (cond
@@ -28,75 +30,48 @@
     (string? x)  (Long/parseLong (.trim ^String x))
     :else        (long x)))
 
-(defn- emoji-matches?
-  [emoji]
-  (let [n (:name emoji)]
-    (contains? reaction-emoji-names n)))
+(defn- emoji=?
+  "Match emoji from event against rule.
+   - Unicode emoji: match :name
+   - Custom emoji: match :id"
+  [rule-emoji event-emoji]
+  (and (map? rule-emoji)
+       (map? event-emoji)
+       (cond
+         (:id rule-emoji) (= (str (:id rule-emoji)) (str (:id event-emoji)))
+         (:name rule-emoji) (= (:name rule-emoji) (:name event-emoji))
+         :else false)))
+
+(defn- matching-rule
+  [{:keys [message-id emoji]}]
+  (let [mid (to-long message-id)]
+    (some (fn [r]
+            (when (and (= mid (to-long (:message-id r)))
+                       (emoji=? (:emoji r) emoji))
+              r))
+          reaction-rules)))
 
 
 (defn handle-reaction-add!
-  "Handle a :message-reaction-add event.
-   Adds role when (message-id == reaction-message-id) and emoji matches."
-  [{:keys [guild-id user-id message-id emoji] :as evt}]
-  (println "rr/add evt:"
-           {:guild-id guild-id
-            :user-id user-id
-            :message-id message-id
-            :emoji emoji})
-
-  (cond
-    (nil? guild-id)
-    (println "rr/add: missing guild-id (DM reaction?)")
-
-    (nil? user-id)
-    (println "rr/add: missing user-id")
-
-    (nil? message-id)
-    (println "rr/add: missing message-id")
-
-    (not (map? emoji))
-    (println "rr/add: emoji not a map:" (pr-str emoji))
-
-    :else
-    (let [mid (to-long message-id)
-          en  (:name emoji)]
-      (println "rr/add: mid=" mid
-               "target=" reaction-message-id
-               "emoji-name=" (pr-str en)
-               "matches?=" (emoji-matches? emoji))
-
-      (if-not (= mid reaction-message-id)
-        (println "rr/add: message-id mismatch")
-
-        (if-not (emoji-matches? emoji)
-          (println "rr/add: emoji mismatch")
-
-          (if-let [messaging (:messaging @state)]
-            (do
-              (println "rr/add: applying role"
-                       reaction-role-id
-                       "to user"
-                       user-id)
-              (m/add-guild-member-role!
-               messaging
-               (to-long guild-id)
-               (to-long user-id)
-               (to-long reaction-role-id)))
-
-            (println "rr/add: messaging is nil")))))))
-
+  [{:keys [guild-id user-id] :as evt}]
+  (when (and guild-id user-id)
+    (when-let [{:keys [role-id label]} (matching-rule evt)]
+      (println "rr/add matched:" label "role" role-id "user" user-id)
+      (when-let [messaging (:messaging @state)]
+        (m/add-guild-member-role!
+         messaging
+         (to-long guild-id)
+         (to-long user-id)
+         (to-long role-id))))))
 
 (defn handle-reaction-remove!
-  "Handle a :message-reaction-remove event.
-   Optional: removes role when reaction is removed."
-  [{:keys [guild-id user-id message-id emoji]}]
-  (when (and guild-id user-id message-id (map? emoji))
-    (let [mid (to-long message-id)]
-      (when (and (= mid reaction-message-id)
-                 (emoji-matches? emoji))
-        (when-let [messaging (:messaging @state)]
-          (m/remove-guild-member-role!
-           messaging
-           (to-long guild-id)
-           (to-long user-id)
-           (to-long reaction-role-id)))))))
+  [{:keys [guild-id user-id] :as evt}]
+  (when (and guild-id user-id)
+    (when-let [{:keys [role-id label]} (matching-rule evt)]
+      (println "rr/remove matched:" label "role" role-id "user" user-id)
+      (when-let [messaging (:messaging @state)]
+        (m/remove-guild-member-role!
+         messaging
+         (to-long guild-id)
+         (to-long user-id)
+         (to-long role-id))))))
