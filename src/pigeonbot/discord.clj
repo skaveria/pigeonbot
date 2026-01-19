@@ -13,7 +13,6 @@
   (when (= event-type :message-create)
     (commands/handle-message event-data)))
 
-
 (defn start-bot
   "Connect to Discord and start the event pump (blocking)."
   []
@@ -23,11 +22,10 @@
                                  :intents #{:guilds :guild-messages})
         msg-ch   (m/start-connection! token)]
 
-    (p/update-presence!
+    ;; ✅ ABSOLUTE MINIMUM PRESENCE UPDATE
+    (c/status-update!
      conn
-     {:status :online
-      :activities [{:name "you closely"
-                     :type :watching}]})
+     :status :online)
 
     (reset! state {:connection conn
                    :events     event-ch
