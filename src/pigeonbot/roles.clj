@@ -4,18 +4,33 @@
             [pigeonbot.state :refer [state]]))
 
 (defn allowed-role-ids
-  "Return a set of role IDs (longs) that are self-assignable.
-   Accepts numbers or numeric strings in config.edn."
+  "Return a set of self-assignable role IDs (longs).
+
+   Accepts IDs from either:
+   - :self-role-ids  (preferred)
+   - :self-roles     (fallback)
+
+   Values may be:
+   - numbers
+   - numeric strings
+   - keywords like :1234567890 (rare, but we tolerate it)
+   Any non-numeric values are ignored."
   []
-  (let [ids (get (config/load-config) :self-role-ids [])]
-    (->> ids
+  (let [cfg (config/load-config)
+        raw (or (:self-role-ids cfg)
+                (:self-roles cfg)
+                [])]
+    (->> raw
          (keep (fn [x]
                  (cond
                    (integer? x) (long x)
                    (number? x)  (long x)
-                   (string? x)  (try
-                                  (Long/parseLong (clojure.string/trim x))
-                                  (catch Throwable _ nil))
+                   (string? x)  (let [s (.trim ^String x)]
+                                  (when (re-matches #"\d+" s)
+                                    (Long/parseLong s)))
+                   (keyword? x) (let [s (name x)]
+                                  (when (re-matches #"\d+" s)
+                                    (Long/parseLong s)))
                    :else nil)))
          set)))
 
