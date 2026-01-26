@@ -26,6 +26,7 @@
    "!help"       "Shows this help message."
    "!odinthewise" "Posts the Odin the Wise image."
    "!partycat"   "Posts the Partycat image."
+   "!slcomputers"   "Posts the Dr Strangelove computers gif."
    "!wimdy"      "Posts the wimdy gif."})
 
 (defn cmd-ping [{:keys [channel-id]}]
@@ -46,12 +47,16 @@
 (defn cmd-wimdy [{:keys [channel-id]}]
   (send! channel-id :content "" :file (media-file "wimdy.gif")))
 
+(defn cmd-slcomputers [{:keys [channel-id]}]
+  (send! channel-id :content "" :file (media-file "slcomputers.gif")))
+
 (def commands
   {"!ping"        cmd-ping
    "!help"        cmd-help
    "!partycat"    cmd-partycat
    "!wimdy"       cmd-wimdy
    "!odinthewise" cmd-odinthewise
+   "!slcomputers" cmd-slcomputers
    })
 
 (defn handle-message [{:keys [content] :as msg}]
