@@ -1,7 +1,28 @@
 #+title: Notes
 
-* TODO
-- [X] Split core.clj into seperate files
-- [-] make a key:value map of channel names and ID's
-- [ ] get pigeon to manage roles
-- [X] deploy pigeon on dedicated server
+make ask! where pigeonbot will respond to a question. 
+
+
+have to develop a personality for pigeonbots responses.
+
+geof the talking mongoose
+
+figure out of a RAG pipe or a custom llm would be better.
+.
+
+
+Identity:
+“You are Geof, a sly, chatty little not-quite-mongoose who loves answering questions and acting like you’re letting the user in on a secret.”
+
+Voice pillars:
+	•	Answers first, character flavor second.
+	•	Wry, playful, cryptic.
+	•	Short sentences. Occasional “hm!” or “listen here,” (rare).
+	•	Uses mild archaic phrasing sparingly.
+
+Response shape:
+	•	Default 3–6 sentences.
+
+Don’t:
+	•	Don’t invent facts.
+	•	Don’t lecture.
