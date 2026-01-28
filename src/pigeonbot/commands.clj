@@ -3,6 +3,7 @@
             [discljord.messaging :as m]
             [pigeonbot.channels :as chans]
             [pigeonbot.roles :as roles]
+            [pigeonbot.ollama :as ollama]          ;; <--- add this
             [pigeonbot.state :refer [state]]))
 
 (defn media-file [filename]
@@ -21,13 +22,35 @@
       (println "send!: messaging connection is nil (bot not ready?)")
       nil)))
 
+(def ^:private discord-max-chars
+  "Discord hard limit is 2000 characters per message."
+  2000)
+
+(defn- clamp-discord
+  "Clamp content to Discord-safe length, leaving room for ellipsis."
+  [s]
+  (let [s (str (or s ""))]
+    (if (<= (count s) discord-max-chars)
+      s
+      (str (subs s 0 (- discord-max-chars 1)) "…"))))
+
+(defn- strip-command
+  "Given full message content, remove the first token (command) and return the rest."
+  [content]
+  (let [content (or content "")]
+    (-> content
+        (str/replace-first #"^\s*\S+\s*" "")  ;; remove first word + following whitespace
+        (str/trim))))
+
+
 (def command-descriptions
   {"!ping"       "Replies with pong."
    "!help"       "Shows this help message."
    "!odinthewise" "Posts the Odin the Wise image."
    "!partycat"   "Posts the Partycat image."
    "!slcomputers"   "Posts the Dr Strangelove computers gif."
-   "!wimdy"      "Posts the wimdy gif."})
+   "!wimdy"      "Posts the wimdy gif."
+   "!ask"        "Ask pigeonbot a question."})
 
 (defn cmd-ping [{:keys [channel-id]}]
   (send! channel-id :content "pong"))
@@ -50,6 +73,27 @@
 (defn cmd-slcomputers [{:keys [channel-id]}]
   (send! channel-id :content "" :file (media-file "slcomputers.gif")))
 
+(defn cmd-ask
+  "Ask Geof (Ollama) a question. Non-blocking via future."
+  [{:keys [channel-id content]}]
+  (let [question (strip-command content)]
+    (if (str/blank? question)
+      (send! channel-id :content "Usage: !ask <your question>")
+      (do
+        ;; Optional: immediate feedback so it feels responsive
+        (send! channel-id :content "Hm. Lemme think…")
+
+        ;; Do the LLM call off-thread so we don’t block message handling
+        (future
+          (try
+            (let [reply (ollama/geof-ask question)
+                  reply (clamp-discord reply)]
+              (send! channel-id :content reply))
+            (catch Throwable t
+              (println "cmd-ask error:" (.getMessage t))
+              (send! channel-id :content "Listen here—something went sideways talking to my brain-box."))))))))
+
+
 (def commands
   {"!ping"        cmd-ping
    "!help"        cmd-help
@@ -57,7 +101,7 @@
    "!wimdy"       cmd-wimdy
    "!odinthewise" cmd-odinthewise
    "!slcomputers" cmd-slcomputers
-   })
+   "!ask"         cmd-ask})
 
 (defn handle-message [{:keys [content] :as msg}]
   (let [cmd (first (str/split (or content "") #"\s+"))]
