@@ -1,8 +1,12 @@
 (ns pigeonbot.ollama
   (:require [clojure.string :as str])
   (:import (java.net URI)
-           (java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers)
-           (java.time Duration)))
+         (java.net.http HttpClient
+                        HttpRequest
+                        HttpRequest$BodyPublishers
+                        HttpResponse$BodyHandlers)
+         (java.time Duration))
+  )
 
 ;; --- JSON helpers (no external deps) ---
 ;; This is a tiny JSON encoder/decoder to avoid adding libs.
