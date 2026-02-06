@@ -99,38 +99,6 @@
   (println "Bot stopped."))
 
 
-(defcmd "!registercommand"
-  "Register a custom media command: !registercommand <name> + attach a file"
-  [{:keys [channel-id content attachments author] :as msg}]
-  (cond
-    (not (custom/allowed-to-register? msg))
-    (send! channel-id :content "❌ You’re not allowed to register commands.")
-
-    :else
-    (let [[_ name] (str/split (or content "") #"\s+" 3)]
-      (cond
-        (not (custom/valid-name? name))
-        (send! channel-id :content "Usage: !registercommand <name>  (letters/numbers/_/- only)")
-
-        (empty? attachments)
-        (send! channel-id :content "Attach a file to register: `!registercommand moo` + upload cow.png")
-
-        :else
-        (let [cmd (custom/normalize-command name)]
-          (cond
-            (contains? @commands cmd)
-            (send! channel-id :content (str "❌ `" cmd "` is a built-in command and can’t be overridden."))
-
-            :else
-            (let [att (first attachments)
-                  author-id (get-in author [:id])
-                  {:keys [ok? message file]} (custom/register-from-attachment! cmd att author-id)]
-              (if ok?
-                (send! channel-id :content (str "✅ Registered `" cmd "` → `" file "`. Try it now!"))
-                (send! channel-id :content (str "❌ " message))))))))))
-;;                                                                 ^^^^^^^^^
-;; closes: if, let(att..), cond(cmd), let(cmd), cond(name), let(name), cond(top), defcmd
-
 
 (defn restart-bot! []
   (println "Restarting pigeonbot…")
