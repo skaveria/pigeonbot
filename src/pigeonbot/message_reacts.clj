@@ -19,14 +19,8 @@
    Stored :file in rule is relative to src/pigeonbot/media/."
   "src/pigeonbot/media/react/")
 
-(defonce rules*
-  "Vector of rules:
-   {:trigger \"sandwich\"
-    :reply   {:type :text :text \"did you mean sandos?\"}
-    :added-by \"123\"
-    :added-at 1234567890}
-
-   or :reply {:type :file :file \"react/sandos.png\"}"
+(defonce ^{:doc "Vector of rules: {:trigger \"sandwich\" :reply {:type :text :text \"...\"} ...} or {:type :file :file \"react/x.png\"}."}
+  rules*
   (atom []))
 
 (defn- ensure-dir! [path]
@@ -126,8 +120,8 @@
   "Add a text reaction rule."
   [trigger text author-id]
   (swap! rules* conj
-         {:trigger (str trigger)
-          :reply   {:type :text :text (str text)}
+         {:trigger  (str trigger)
+          :reply    {:type :text :text (str text)}
           :added-by (str author-id)
           :added-at (System/currentTimeMillis)})
   (save!)
@@ -159,8 +153,8 @@
           (try
             (download-url->file! url out-file)
             (swap! rules* conj
-                   {:trigger (str trigger)
-                    :reply   {:type :file :file rel-path}
+                   {:trigger  (str trigger)
+                    :reply    {:type :file :file rel-path}
                     :added-by (str author-id)
                     :added-at (System/currentTimeMillis)})
             (save!)
@@ -174,12 +168,10 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- bot-message?
-  "Discord event payloads usually have :author {:bot true/false}."
   [msg]
   (true? (get-in msg [:author :bot])))
 
 (defn- command-message?
-  "Avoid reacting to commands to reduce noise/loops."
   [content]
   (and (string? content)
        (str/starts-with? (str/triml content) "!")))
@@ -189,18 +181,16 @@
   (let [h (str/lower-case (or haystack ""))
         n (str/lower-case (or needle ""))]
     (and (seq n)
-         (not (str/blank? n))
-         (<= (count n) (count h))
          (not= -1 (.indexOf ^String h ^String n)))))
 
 (defn maybe-react!
   "If msg content contains a registered trigger, send its reply.
 
-  Behavior:
-  - ignores bot messages
-  - ignores messages starting with '!' (commands)
-  - sends only the first matching rule (in insertion order)
-  Returns true if it reacted, else nil/false."
+  Ignores:
+  - bot messages
+  - messages starting with '!' (commands)
+
+  Sends only the first matching rule (in insertion order)."
   [{:keys [channel-id content] :as msg}]
   (when (and channel-id
              (not (bot-message? msg))
