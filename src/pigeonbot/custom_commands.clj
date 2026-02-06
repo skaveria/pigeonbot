@@ -17,8 +17,8 @@
    Stored path in registry is relative to src/pigeonbot/media/."
   "src/pigeonbot/media/custom/")
 
-(defonce registry*
-  "Map: \"!moo\" -> {:file \"custom/moo.png\" :added-by \"123\" :added-at 1234567890}"
+(defonce ^{:doc "Map: \"!moo\" -> {:file \"custom/moo.png\" :added-by \"123\" :added-at 1234567890}"}
+  registry*
   (atom {}))
 
 (defn- ensure-dir! [path]
@@ -105,15 +105,11 @@
   out-file)
 
 (defn register-from-attachment!
-  "Register a custom command from a message's attachment map.
+  "Register a custom command from a Discord attachment map.
 
-  Args:
-    cmd          - command string like \"!moo\"
-    attachment   - map from Discord event, expects :url :filename :size
-    author-id    - string/number
   Returns:
     {:ok? true :cmd \"!moo\" :file \"custom/moo.png\"}
-    or {:ok? false :reason <kw> :message \"...\"}"
+  or {:ok? false :reason <kw> :message \"...\"}"
   [cmd attachment author-id]
   (let [{:keys [url filename size]} attachment
         ext (safe-ext filename)
@@ -133,7 +129,6 @@
         (ensure-dir! custom-media-dir)
         (let [basename (subs cmd 1) ;; strip leading !
               out-name (str basename ext)
-              ;; store relative to src/pigeonbot/media/
               rel-path (str "custom/" out-name)
               out-file (io/file custom-media-dir out-name)]
           (try
