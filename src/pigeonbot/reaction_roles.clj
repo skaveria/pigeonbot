@@ -2,10 +2,6 @@
   (:require [discljord.messaging :as m]
             [pigeonbot.state :refer [state]]))
 
-;; ---------------------------------------------------------------------------
-;; Configuration (hard-coded for now, as requested)
-;; ---------------------------------------------------------------------------
-
 (def reaction-rules
   [{:message-id 1462920692671447142
     :role-id    1462910582582935583
@@ -14,14 +10,13 @@
 
    {:message-id 1462920692671447142
     :role-id    1462910818239779120
-    :emoji      {:name "tposs"}   ;; <- change to whatever emoji you picked
+    :emoji      {:name "tposs"}
     :label      "opossum"}
 
    {:message-id 1462920692671447142
     :role-id    1462911178777825505
-    :emoji      {:name "🫠"}   ;; <- change to whatever emoji you picked
+    :emoji      {:name "🫠"}
     :label      "silly"}])
-
 
 (defn- to-long [x]
   (cond
@@ -50,7 +45,6 @@
                        (emoji=? (:emoji r) emoji))
               r))
           reaction-rules)))
-
 
 (defn handle-reaction-add!
   [{:keys [guild-id user-id] :as evt}]

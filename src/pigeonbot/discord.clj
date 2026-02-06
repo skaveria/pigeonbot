@@ -1,54 +1,43 @@
 (ns pigeonbot.discord
   (:require [clojure.core.async :as a]
+            [clojure.string :as str]
             [discljord.connections :as c]
             [discljord.events :as e]
-            [pigeonbot.reaction-roles :as rr]
             [discljord.messaging :as m]
+            [pigeonbot.channels :as channels]
             [pigeonbot.commands :as commands]
             [pigeonbot.config :as config]
-            [pigeonbot.channels :as chans]
+            [pigeonbot.discljord-patch :as djpatch]
+            [pigeonbot.reaction-roles :as rr]
             [pigeonbot.state :refer [state]]))
 
-
-
 (defonce seen-events* (atom #{}))
+(defonce bot-future (atom nil))
 
-(defonce seen-events* (atom #{}))
-
-(defn handle-event
-  [event-type event-data]
-  ;; log each event type once
+(defn handle-event [event-type event-data]
   (when-not (contains? @seen-events* event-type)
     (swap! seen-events* conj event-type)
     (println "EVENT TYPE:" event-type))
 
-  ;; log anything reaction-related, regardless of exact keyword
-  (when (and event-type
-             (clojure.string/includes? (name event-type) "reaction"))
+  (when (and event-type (str/includes? (name event-type) "reaction"))
     (println "REACTION-ish EVENT:" event-type
              (select-keys event-data [:guild-id :channel-id :message-id :user-id :emoji])))
 
-  ;; now do your normal routing
   (case event-type
-    :message-create
-    (commands/handle-message event-data)
-
-    ;; keep these in case they *are* the right keywords
-    :message-reaction-add
-    (rr/handle-reaction-add! event-data)
-
-    :message-reaction-remove
-    (rr/handle-reaction-remove! event-data)
-
+    :message-create (commands/handle-message event-data)
+    :message-reaction-add (rr/handle-reaction-add! event-data)
+    :message-reaction-remove (rr/handle-reaction-remove! event-data)
     nil))
 
 (defn start-bot
   "Connect to Discord and start the event pump (blocking)."
   []
+  (channels/load-channels!)
+  (djpatch/patch-discljord!)
+
   (let [{:keys [token]} (config/load-config)
         event-ch (a/chan 100)
 
-        ;; Pick the correct reactions intent keyword for *this* Discljord build.
         reaction-intent (or (when (contains? c/gateway-intents :guild-message-reactions)
                               :guild-message-reactions)
                             (when (contains? c/gateway-intents :guild-message-reaction)
@@ -68,69 +57,46 @@
     (when-not reaction-intent
       (println "WARNING: Could not find a reaction intent keyword in discljord.connections/gateway-intents"))
 
-    (reset! state {:connection conn
-                   :events     event-ch
-                   :messaging  msg-ch})
-
+    (reset! state {:connection conn :events event-ch :messaging msg-ch})
     (println "Connected to Discord (online)")
     (e/message-pump! event-ch handle-event)))
 
-(def bot-future (atom nil))
-
 (defn start-bot!
-  "Starts the bot in the background and returns the messaging handle
-   for convenient use at the REPL."
+  "Starts the bot in the background and returns the messaging handle."
   []
-  (reset! bot-future
-          (future
-            (start-bot)))
-  ;; wait briefly for :messaging to appear in state
+  (reset! bot-future (future (start-bot)))
   (loop [tries 0]
     (if-let [msg (:messaging @state)]
       msg
       (if (< tries 20)
-        (do (Thread/sleep 250)
-            (recur (inc tries)))
-        (do
-          (println "start-bot!: timed out waiting for messaging connection.")
-          nil)))))
+        (do (Thread/sleep 250) (recur (inc tries)))
+        (do (println "start-bot!: timed out waiting for messaging connection.") nil)))))
 
 (defn stop-bot!
-  "Best-effort stop of the running bot.
-   Explicitly disconnects gateway + messaging to avoid zombie threads."
+  "Best-effort stop of the running bot."
   []
   (let [{:keys [events connection messaging]} @state]
     (println "Stopping bot connections…")
 
-    ;; Stop accepting events first.
     (when events
-      (a/close! events))
+      (try (a/close! events)
+           (catch Throwable t (println "stop-bot!: close events failed:" (.getMessage t)))))
 
-    ;; Hard disconnect gateway websocket (stops the event stream).
     (when connection
-      (try
-        (c/disconnect-bot! connection)
-        (catch Throwable t
-          (println "stop-bot!: disconnect-bot! failed:" (.getMessage t)))))
+      (try (c/disconnect-bot! connection)
+           (catch Throwable t (println "stop-bot!: disconnect-bot! failed:" (.getMessage t)))))
 
-    ;; Stop messaging connection thread(s).
     (when messaging
-      (try
-        (m/stop-connection! messaging)
-        (catch Throwable t
-          (println "stop-bot!: stop-connection! failed:" (.getMessage t))))))
+      (try (m/stop-connection! messaging)
+           (catch Throwable t (println "stop-bot!: stop-connection! failed:" (.getMessage t))))))
 
-  ;; Cancel the background future (if it’s still running).
   (when-let [f @bot-future]
     (future-cancel f))
-
   (reset! bot-future nil)
-  (reset! state nil)
+  (reset! state {}) ;; keep it a map for sanity
   (println "Bot stopped."))
 
-(defn restart-bot!
-  "Restart the Discord bot cleanly from the REPL."
-  []
+(defn restart-bot! []
   (println "Restarting pigeonbot…")
   (stop-bot!)
   (Thread/sleep 500)

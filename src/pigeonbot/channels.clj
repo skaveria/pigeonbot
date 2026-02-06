@@ -77,34 +77,3 @@
       (m/create-message! messaging channel-id :content (str text))
       (do (println "channels/send!: messaging is nil") nil))
     (do (println "channels/send!: unknown channel" friendly) nil)))
-
-;; -----------------------------------------------------------------------------
-;; Boot-time learning from Discord gateway payloads
-;; -----------------------------------------------------------------------------
-
-(defn- channel-friendly
-  "Build a stable friendly keyword from guild + channel names.
-   Example: \"My Server\" + \"general\" -> :my-server--general"
-  [guild-name channel-name]
-  (let [g (some-> guild-name normalize-name name)
-        c (some-> channel-name normalize-name name)]
-    (when (and (seq g) (seq c))
-      (keyword (str g "--" c)))))
-
-(defn learn-channel!
-  "Learn a single channel from gateway event data.
-   Accepts optional guild-name; if present, stores :guild--channel form."
-  [{:keys [id name] :as _channel} guild-name]
-  (when-let [friendly (or (channel-friendly guild-name name)
-                          (normalize-name name))]
-    (remember-channel! (name friendly) id)))
-
-(defn learn-guild!
-  "Learn all channels from a :guild-create event payload.
-   Expects guild map containing :name and :channels."
-  [{:keys [name channels] :as _guild}]
-  (when (seq channels)
-    (doseq [ch channels]
-      (learn-channel! ch name))
-    (save-channels!))
-  true)

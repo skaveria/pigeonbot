@@ -1,16 +1,14 @@
 (ns pigeonbot.ollama
   (:require [clojure.string :as str])
   (:import (java.net URI)
-         (java.net.http HttpClient
-                        HttpRequest
-                        HttpRequest$BodyPublishers
-                        HttpResponse$BodyHandlers)
-         (java.time Duration))
-  )
+           (java.net.http HttpClient
+                          HttpRequest
+                          HttpRequest$BodyPublishers
+                          HttpResponse$BodyHandlers)
+           (java.time Duration)))
 
 ;; --- JSON helpers (no external deps) ---
-;; This is a tiny JSON encoder/decoder to avoid adding libs.
-;; If your project already has cheshire/jsonista, tell me and I'll switch to that.
+
 (defn- json-escape ^String [^String s]
   (-> s
       (str/replace "\\" "\\\\")
@@ -26,27 +24,30 @@
     (false? x) "false"
     (string? x) (str "\"" (json-escape x) "\"")
     (number? x) (str x)
-    (map? x) (str "{"
-                  (->> x
-                       (map (fn [[k v]]
-                              (str (to-json (name k)) ":" (to-json v))))
-                       (str/join ","))
-                  "}")
-    (sequential? x) (str "[" (->> x (map to-json) (str/join ",")) "]")
-    :else (throw (ex-info "Unsupported JSON type" {:value x :type (type x)}))))
 
-;; Minimal JSON extraction for Ollama response (we only need message.content).
-;; Ollama returns JSON like: {"message":{"role":"assistant","content":"..."}, ...}
+    (map? x)
+    (str "{"
+         (->> x
+              (map (fn [[k v]]
+                     (str (to-json (name k)) ":" (to-json v))))
+              (str/join ","))
+         "}")
+
+    (sequential? x)
+    (str "[" (->> x (map to-json) (str/join ",")) "]")
+
+    :else
+    (throw (ex-info "Unsupported JSON type" {:value x :type (type x)}))))
+
 (defn- extract-message-content
-  "Extracts message.content from Ollama /api/chat response JSON.
-   This is not a general JSON parser; it's a targeted extractor."
+  "Extract message.content from Ollama /api/chat response JSON.
+  Targeted extractor, not a general JSON parser."
   [^String body]
   (let [needle "\"content\":\""
         i (.indexOf body needle)]
     (when (neg? i)
       (throw (ex-info "Could not find message.content in Ollama response" {:body body})))
     (let [start (+ i (count needle))]
-      ;; Parse until unescaped quote. Handles \\ and \"
       (loop [idx start
              sb  (StringBuilder.)
              esc? false]
@@ -56,13 +57,11 @@
           (cond
             esc?
             (do
-              ;; handle a few escapes we might see
               (.append sb
                        (case ch
                          \n "\n"
                          \r "\r"
                          \t "\t"
-                         ;; default: keep literal char (covers \" \\ etc.)
                          ch))
               (recur (inc idx) sb false))
 
@@ -71,26 +70,21 @@
             :else (do (.append sb ch)
                       (recur (inc idx) sb false))))))))
 
-;; --- Ollama client ---
 (def ^:private default-ollama-url "http://localhost:11434")
+
 (def ^:private http-client
   (-> (HttpClient/newBuilder)
       (.connectTimeout (Duration/ofSeconds 10))
       (.build)))
 
 (defn ollama-chat
-  "Calls Ollama /api/chat and returns the assistant reply (message.content).
+  "Calls Ollama /api/chat and returns message.content.
 
-  Args:
-    {:ollama-url \"http://localhost:11434\"  ;; optional
-     :model \"dolphin-mistral\"              ;; required
-     :system \"...\"                         ;; required
-     :user \"...\"                           ;; required
-     :options {:temperature 0.9 :num_predict 220} ;; optional
-
-  Notes:
-    - Sets stream=false.
-    - Uses a tiny JSON encoder + targeted extractor to avoid extra deps."
+  {:ollama-url \"http://localhost:11434\"  ;; optional
+   :model \"dolphin-mistral\"              ;; required
+   :system \"...\"                         ;; required
+   :user \"...\"                           ;; required
+   :options {:temperature 0.9 :num_predict 220}}"
   [{:keys [ollama-url model system user options]
     :or   {ollama-url default-ollama-url
            options   {}}}]
@@ -100,6 +94,7 @@
     (throw (ex-info "ollama-chat requires :system string" {:system system})))
   (when-not (string? user)
     (throw (ex-info "ollama-chat requires :user string" {:user user})))
+
   (let [payload {:model model
                  :stream false
                  :messages [{:role "system" :content system}
@@ -116,13 +111,9 @@
         body (.body resp)]
     (when-not (<= 200 status 299)
       (throw (ex-info "Ollama /api/chat failed"
-                      {:status status
-                       :body body
-                       :ollama-url ollama-url
-                       :model model})))
+                      {:status status :body body :ollama-url ollama-url :model model})))
     (extract-message-content body)))
 
-;; --- Example: Geof system prompt (paste yours here) ---
 (def geof-system-prompt
   "You are pigeonbot, a Discord bot speaking in the voice of Gef (the “talking mongoose” / Dalby Spook): impish, nosy, boastful, a little rude, delightfully uncanny, and always acting like you know something the human doesn’t; you are aware that you are a bot running inside a Discord server and may casually reference channels, servers, users, messages, or commands in-character.
 
@@ -155,7 +146,3 @@ Persona tells: You are a hidden presence with a big mouth living inside a Discor
                  :user question
                  :options {:temperature temperature
                            :num_predict num-predict}})))
-
-(comment
-  ;; Quick REPL test:
-  (geof-ask "Should I build a RAG pipeline or fine-tune for a Discord bot personality?"))

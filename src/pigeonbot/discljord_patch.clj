@@ -10,18 +10,19 @@
     true))
 
 (defn patch-discljord!
-  "Harden discljord so dispatch-http never dies on nil/blank JSON bodies or
-   other unexpected responses.
+  "Best-effort hardening so discljord's HTTP dispatch agent is less likely to die.
 
-   Patches (if present):
-   - json_body / json-body : tolerate nil/blank
-   - send_message_BANG_    : catch all throwables and return an error map"
+  Patches (if present):
+  - json_body / json-body : tolerate nil/blank response bodies
+  - send_message_BANG_    : catch throwables and return an error map
+
+  Returns {:patched [...]}."
   []
   (require 'discljord.messaging.impl)
   (let [interns (ns-interns 'discljord.messaging.impl)
         patched (atom [])]
 
-    ;; 1) JSON body parsers: tolerate nil/blank
+    ;; Some versions use json_body, others json-body.
     (doseq [sym ['json_body 'json-body]]
       (when (patch-var! interns sym
               (fn [_orig]
@@ -30,7 +31,7 @@
                     (json/read-str body :key-fn keyword)))))
         (swap! patched conj (str sym))))
 
-    ;; 2) The big one: never let send_message_BANG_ throw inside dispatch-http
+    ;; Prevent exceptions from escaping and killing dispatch-http.
     (doseq [sym ['send_message_BANG_]]
       (when (patch-var! interns sym
               (fn [orig]
@@ -38,8 +39,6 @@
                   (try
                     (apply orig args)
                     (catch Throwable t
-                      ;; Return a consistent error value instead of throwing.
-                      ;; This prevents dispatch-http from dying.
                       {:error :discljord-send-message-exception
                        :message (.getMessage t)
                        :class (str (class t))})))))

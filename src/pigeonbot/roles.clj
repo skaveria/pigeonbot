@@ -6,15 +6,15 @@
 (defn allowed-role-ids
   "Return a set of self-assignable role IDs (longs).
 
-   Accepts IDs from either:
-   - :self-role-ids  (preferred)
-   - :self-roles     (fallback)
+  Accepts IDs from either:
+  - :self-role-ids  (preferred)
+  - :self-roles     (fallback)
 
-   Values may be:
-   - numbers
-   - numeric strings
-   - keywords like :1234567890 (rare, but we tolerate it)
-   Any non-numeric values are ignored."
+  Values may be:
+  - numbers
+  - numeric strings
+  - keywords like :1234567890
+  Any non-numeric values are ignored."
   []
   (let [cfg (config/load-config)
         raw (or (:self-role-ids cfg)
@@ -34,9 +34,7 @@
                    :else nil)))
          set)))
 
-(defn list-roles
-  "Return allowed self-assignable role IDs."
-  []
+(defn list-roles []
   (sort (allowed-role-ids)))
 
 (defn add-role!
