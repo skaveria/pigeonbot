@@ -151,8 +151,8 @@
 
   (defmedia \"!wimdy\" \"Posts the wimdy gif.\" \"wimdy.gif\")"
   [cmd desc filename]
-  `(defcmd ~cmd ~desc [{:keys [channel-id]}]
-     (send-file! channel-id (media-file ~filename))))
+  `(defcmd ~cmd ~desc [msg#]
+     (send-file! (:channel-id msg#) (media-file ~filename))))
 
 ;; -----------------------------------------------------------------------------
 ;; Built-in commands
