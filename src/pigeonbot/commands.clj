@@ -3,6 +3,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [discljord.messaging :as m]
+            [pigeonbot.custom-commands :as custom]
             [pigeonbot.ollama :as ollama]
             [pigeonbot.roles :as roles]
             [pigeonbot.state :refer [state]]))
@@ -85,7 +86,8 @@
   (atom {"!ping" "Replies with pong."
          "!help" "Shows this help message."
          "!ask"  "Ask pigeonbot a question."
-         "!role" "Self-assignable roles: !role add <ROLE_ID> | !role remove <ROLE_ID>"}))
+         "!role" "Self-assignable roles: !role add <ROLE_ID> | !role remove <ROLE_ID>"
+         "!registercommand" "Register a custom media command: !registercommand <name> + attach a file"}))
 
 (def commands (atom {}))
 
@@ -168,7 +170,11 @@
       "remove" (cmd-role-remove msg)
       (send! (:channel-id msg) :content "Usage: !role add <ROLE_ID> | !role remove <ROLE_ID>"))))
 
-(defn handle-message [{:keys [content] :as msg}]
+
+(defn handle-message [{:keys [content channel-id] :as msg}]
   (let [cmd (first (str/split (or content "") #"\s+"))]
-    (when-let [cmd-fn (@commands cmd)]
-      (cmd-fn msg))))
+    (if-let [cmd-fn (@commands cmd)]
+      (cmd-fn msg)
+      ;; fallback: custom command lookup
+      (when-let [f (custom/registered-file cmd)]
+        (send-file! channel-id f)))))
