@@ -6,32 +6,20 @@
             [pigeonbot.config :as config]
             [pigeonbot.state :refer [state]]))
 
-;; -----------------------------------------------------------------------------
-;; Storage
-;; -----------------------------------------------------------------------------
-
 (def ^:private rules-path
   "EDN file in repo root storing reaction rules."
   "react_rules.edn")
 
-(def ^:private react-media-dir
-  "Directory under src/ where reaction media gets stored.
-   Stored :file in rule is relative to src/pigeonbot/media/."
-  "src/pigeonbot/media/react/")
-
-(defonce ^{:doc "Vector of rules: {:trigger \"sandwich\" :reply {:type :text :text \"...\"} ...} or {:type :file :file \"react/x.png\"}."}
+(defonce ^{:doc "Vector of rules:
+  {:trigger \"sandwich\" :reply {:type :text :text \"...\"}}
+  {:trigger \"sandwich\" :reply {:type :url :url \"https://cdn...\"}}
+  Back-compat: {:type :file :file \"react/x.png\"} from older versions."}
   rules*
   (atom []))
-
-(defn- ensure-dir! [path]
-  (let [d (io/file path)]
-    (.mkdirs d)
-    d))
 
 (defn load!
   "Load rules from disk (if present). Safe to call multiple times."
   []
-  (ensure-dir! react-media-dir)
   (let [f (io/file rules-path)]
     (reset! rules*
             (if (.exists f)
@@ -71,46 +59,30 @@
   "Refuse very large attachments."
   (* 8 1024 1024)) ;; 8 MiB
 
-(defn- safe-ext
-  "Return a safe extension (including dot) based on filename, or nil."
-  [filename]
-  (let [lower (-> (or filename "") str/lower-case)]
-    (cond
-      (str/ends-with? lower ".png")  ".png"
-      (str/ends-with? lower ".gif")  ".gif"
-      (str/ends-with? lower ".jpg")  ".jpg"
-      (str/ends-with? lower ".jpeg") ".jpeg"
-      (str/ends-with? lower ".webp") ".webp"
-      (str/ends-with? lower ".mp4")  ".mp4"
-      :else nil)))
-
-(defn- slugify
-  "Turn trigger string into a safe-ish filename base."
-  [s]
-  (let [raw (-> (or s "") str/lower-case str/trim)
-        cooked (-> raw
-                   (str/replace #"[^a-z0-9]+" "-")
-                   (str/replace #"^-+" "")
-                   (str/replace #"-+$" ""))]
-    (if (seq cooked) cooked "react")))
-
-(defn- download-url->file!
-  "Download URL to local out-file (binary-safe)."
-  [url ^java.io.File out-file]
-  (with-open [in  (io/input-stream (java.net.URL. url))
-              out (io/output-stream out-file)]
-    (io/copy in out))
-  out-file)
-
 (defn- send-text!
   [channel-id text]
   (when-let [messaging (:messaging @state)]
     (m/create-message! messaging channel-id :content (or text ""))))
 
 (defn- send-file!
+  "Back-compat only: send a local file if you still have file-based rules."
   [channel-id ^java.io.File f]
   (when-let [messaging (:messaging @state)]
     (m/create-message! messaging channel-id :content "" :file f)))
+
+(defn- bot-message? [msg]
+  (true? (get-in msg [:author :bot])))
+
+(defn- command-message? [content]
+  (and (string? content)
+       (str/starts-with? (str/triml content) "!")))
+
+(defn- contains-ci?
+  [haystack needle]
+  (let [h (str/lower-case (or haystack ""))
+        n (str/lower-case (or needle ""))]
+    (and (seq n)
+         (not= -1 (.indexOf ^String h ^String n)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Rule registration
@@ -128,68 +100,35 @@
   {:ok? true})
 
 (defn register-attachment!
-  "Add an attachment reaction rule from a Discord attachment map."
+  "Add an attachment reaction rule from a Discord attachment map.
+  Stores the Discord CDN URL (no download, no re-upload)."
   [trigger attachment author-id]
   (let [{:keys [url filename size]} attachment
-        ext (safe-ext filename)
         size (or size 0)]
     (cond
       (nil? url)
-      {:ok? false :message "Attachment has no URL (can’t download)."}
-
-      (nil? ext)
-      {:ok? false :message "Unsupported file type. Use png/gif/jpg/webp/mp4."}
+      {:ok? false :message "Attachment has no URL (can’t register)."}
 
       (> (long size) (long max-bytes))
       {:ok? false :message (str "File too large (" size " bytes).")}
 
       :else
       (do
-        (ensure-dir! react-media-dir)
-        (let [base (slugify trigger)
-              out-name (str base "-" (System/currentTimeMillis) ext)
-              rel-path (str "react/" out-name)
-              out-file (io/file react-media-dir out-name)]
-          (try
-            (download-url->file! url out-file)
-            (swap! rules* conj
-                   {:trigger  (str trigger)
-                    :reply    {:type :file :file rel-path}
-                    :added-by (str author-id)
-                    :added-at (System/currentTimeMillis)})
-            (save!)
-            {:ok? true :file rel-path}
-            (catch Throwable t
-              (println "message-reacts/register-attachment!: failed:" (.getMessage t))
-              {:ok? false :message "Failed to download/save that attachment."})))))))
+        (swap! rules* conj
+               {:trigger  (str trigger)
+                :reply    {:type :url :url url :filename filename}
+                :added-by (str author-id)
+                :added-at (System/currentTimeMillis)})
+        (save!)
+        {:ok? true :url url}))))
 
 ;; -----------------------------------------------------------------------------
 ;; Matching + reacting
 ;; -----------------------------------------------------------------------------
 
-(defn- bot-message?
-  [msg]
-  (true? (get-in msg [:author :bot])))
-
-(defn- command-message?
-  [content]
-  (and (string? content)
-       (str/starts-with? (str/triml content) "!")))
-
-(defn- contains-ci?
-  [haystack needle]
-  (let [h (str/lower-case (or haystack ""))
-        n (str/lower-case (or needle ""))]
-    (and (seq n)
-         (not= -1 (.indexOf ^String h ^String n)))))
-
 (defn maybe-react!
   "If msg content contains a registered trigger, send its reply.
-
-  Ignores:
-  - bot messages
-  - messages starting with '!' (commands)
-
+  Ignores bot messages and command messages.
   Sends only the first matching rule (in insertion order)."
   [{:keys [channel-id content] :as msg}]
   (when (and channel-id
@@ -198,16 +137,16 @@
     (when-let [rule (some (fn [{:keys [trigger] :as r}]
                             (when (contains-ci? content trigger) r))
                           @rules*)]
-      (let [{:keys [reply]} rule]
+      (let [reply (:reply rule)]
         (case (:type reply)
-          :text
-          (do (send-text! channel-id (:text reply)) true)
+          :text (do (send-text! channel-id (:text reply)) true)
+          :url  (do (send-text! channel-id (:url reply)) true)
 
-          :file
-          (let [rel (:file reply)
-                f (io/file "src/pigeonbot/media" rel)]
-            (if (.exists f)
-              (do (send-file! channel-id f) true)
-              (do (println "maybe-react!: missing file for rule" rel) nil)))
+          ;; back-compat with old file rules, if any
+          :file (let [rel (:file reply)
+                      f (io/file "src/pigeonbot/media" rel)]
+                  (if (.exists f)
+                    (do (send-file! channel-id f) true)
+                    (do (println "maybe-react!: missing file for rule" rel) nil)))
 
           nil)))))

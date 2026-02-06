@@ -47,7 +47,8 @@
     (-> content (str/replace-first #"^\s*\S+\s*" "") (str/trim))))
 
 (defn- send-file!
-  "Send a local file attachment robustly (temp copy + timeout fail-soft)."
+  "Send a local file attachment robustly (temp copy + timeout fail-soft).
+  Note: custom commands should NOT use this anymore; they should be URL-based."
   [channel-id ^java.io.File f]
   (let [path (some-> f .getAbsolutePath)]
     (cond
@@ -132,11 +133,13 @@
               (println "cmd-ask error:" (.getMessage t))
               (send! channel-id :content "Listen here—something went sideways talking to my brain-box."))))))))
 
+;; Built-in media
 (defmedia "!odinthewise" "Posts the Odin the Wise image." "odinthewise.png")
 (defmedia "!partycat"    "Posts the Partycat image."      "partycat.png")
 (defmedia "!slcomputers" "Posts the Dr Strangelove computers gif." "slcomputers.gif")
 (defmedia "!wimdy"       "Posts the wimdy gif."           "wimdy.gif")
 
+;; Roles
 (defn cmd-role-add [{:keys [channel-id guild-id author content]}]
   (let [[_ _ role-id] (str/split (or content "") #"\s+" 3)
         user-id (get-in author [:id])]
@@ -171,6 +174,7 @@
       "remove" (cmd-role-remove msg)
       (send! (:channel-id msg) :content "Usage: !role add <ROLE_ID> | !role remove <ROLE_ID>"))))
 
+;; Register custom command (URL-based now)
 (defcmd "!registercommand"
   "Register a custom media command: !registercommand <name> + attach a file"
   [{:keys [channel-id content attachments author] :as msg}]
@@ -196,19 +200,16 @@
             :else
             (let [att (first attachments)
                   author-id (get-in author [:id])
-                  {:keys [ok? message file]} (custom/register-from-attachment! cmd att author-id)]
+                  {:keys [ok? message url]} (custom/register-from-attachment! cmd att author-id)]
               (if ok?
-                (send! channel-id :content (str "✅ Registered `" cmd "` → `" file "`. Try it now!"))
+                (send! channel-id :content (str "✅ Registered `" cmd "` → CDN URL saved. Try it now!"))
                 (send! channel-id :content (str "❌ " message))))))))))
 
+;; Register react (stores text or URL)
 (defn- parse-registerreact
-  "Parse:
-   !registerreact \"trigger\" \"reply...\"
-   or !registerreact \"trigger\""
   [content]
   (when content
     (let [s (str/trim content)
-          ;; match: !registerreact "trigger" "reply"
           m (re-matches #"(?s)!\s*registerreact\s+\"([^\"]+)\"(?:\s+\"([^\"]*)\")?\s*" s)]
       (when m
         {:trigger (nth m 1)
@@ -239,15 +240,20 @@
               (send! channel-id :content (str "✅ React registered for `" trigger "`."))
               nil)
             (let [att (first attachments)
-                  {:keys [ok? message file]} (reacts/register-attachment! trigger att author-id)]
+                  {:keys [ok? message url]} (reacts/register-attachment! trigger att author-id)]
               (if ok?
-                (send! channel-id :content (str "✅ React registered for `" trigger "` → `" file "`."))
+                (send! channel-id :content (str "✅ React registered for `" trigger "` → CDN URL saved."))
                 (send! channel-id :content (str "❌ " message))))))))))
 
 (defn handle-message [{:keys [content channel-id] :as msg}]
   (let [cmd (first (str/split (or content "") #"\s+"))]
     (if-let [cmd-fn (@commands cmd)]
       (cmd-fn msg)
-      ;; fallback: custom command lookup
-      (when-let [f (custom/registered-file cmd)]
-        (send-file! channel-id f)))))
+      ;; fallback: custom commands (URL-based)
+      (when-let [r (custom/registered-reply cmd)]
+        (case (:type r)
+          :url  (send! channel-id :content (:url r))
+          :file (let [f (io/file "src/pigeonbot/media" (:file r))]
+                  (when (.exists f)
+                    (send-file! channel-id f)))
+          nil)))))
