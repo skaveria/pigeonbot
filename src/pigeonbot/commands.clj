@@ -199,7 +199,7 @@
                   {:keys [ok? message file]} (custom/register-from-attachment! cmd att author-id)]
               (if ok?
                 (send! channel-id :content (str "✅ Registered `" cmd "` → `" file "`. Try it now!"))
-                (send! channel-id :content (str "❌ " message)))))))))))
+                (send! channel-id :content (str "❌ " message))))))))))
 
 (defn- parse-registerreact
   "Parse:
