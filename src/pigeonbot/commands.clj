@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [discljord.messaging :as m]
             [pigeonbot.custom-commands :as custom]
+            [pigeonbot.message-reacts :as reacts]
             [pigeonbot.ollama :as ollama]
             [pigeonbot.roles :as roles]
             [pigeonbot.state :refer [state]]))
@@ -21,8 +22,7 @@
   (java.io.File. (str media-root filename)))
 
 (defn- temp-copy
-  "Copy a file to a temp path and return the temp File.
-  Workaround for attachment edge cases (fresh File object/path)."
+  "Copy a file to a temp path and return the temp File."
   [^java.io.File f ^String name]
   (let [tmp (java.io.File/createTempFile "pigeonbot-" (str "-" name))]
     (io/copy f tmp)
@@ -87,7 +87,8 @@
          "!help" "Shows this help message."
          "!ask"  "Ask pigeonbot a question."
          "!role" "Self-assignable roles: !role add <ROLE_ID> | !role remove <ROLE_ID>"
-         "!registercommand" "Register a custom media command: !registercommand <name> + attach a file"}))
+         "!registercommand" "Register a custom media command: !registercommand <name> + attach a file"
+         "!registerreact" "Register a keyword reaction: !registerreact \"trigger\" \"reply\" OR !registerreact \"trigger\" + attach"}))
 
 (def commands (atom {}))
 
@@ -170,15 +171,6 @@
       "remove" (cmd-role-remove msg)
       (send! (:channel-id msg) :content "Usage: !role add <ROLE_ID> | !role remove <ROLE_ID>"))))
 
-
-(defn handle-message [{:keys [content channel-id] :as msg}]
-  (let [cmd (first (str/split (or content "") #"\s+"))]
-    (if-let [cmd-fn (@commands cmd)]
-      (cmd-fn msg)
-      ;; fallback: custom command lookup
-      (when-let [f (custom/registered-file cmd)]
-        (send-file! channel-id f)))))
-
 (defcmd "!registercommand"
   "Register a custom media command: !registercommand <name> + attach a file"
   [{:keys [channel-id content attachments author] :as msg}]
@@ -198,8 +190,7 @@
         :else
         (let [cmd (custom/normalize-command name)]
           (cond
-            ;; don't allow overriding built-ins
-            (contains? @pigeonbot.commands/commands cmd) ;; or just (contains? @commands cmd) if inside same ns
+            (contains? @commands cmd)
             (send! channel-id :content (str "❌ `" cmd "` is a built-in command and can’t be overridden."))
 
             :else
@@ -208,4 +199,55 @@
                   {:keys [ok? message file]} (custom/register-from-attachment! cmd att author-id)]
               (if ok?
                 (send! channel-id :content (str "✅ Registered `" cmd "` → `" file "`. Try it now!"))
+                (send! channel-id :content (str "❌ " message)))))))))))
+
+(defn- parse-registerreact
+  "Parse:
+   !registerreact \"trigger\" \"reply...\"
+   or !registerreact \"trigger\""
+  [content]
+  (when content
+    (let [s (str/trim content)
+          ;; match: !registerreact "trigger" "reply"
+          m (re-matches #"(?s)!\s*registerreact\s+\"([^\"]+)\"(?:\s+\"([^\"]*)\")?\s*" s)]
+      (when m
+        {:trigger (nth m 1)
+         :reply   (nth m 2)}))))
+
+(defcmd "!registerreact"
+  "Register a keyword reaction: !registerreact \"trigger\" \"reply\" OR !registerreact \"trigger\" + attach"
+  [{:keys [channel-id content attachments author] :as msg}]
+  (cond
+    (not (reacts/allowed-to-register? msg))
+    (send! channel-id :content "❌ You’re not allowed to register reacts.")
+
+    :else
+    (let [{:keys [trigger reply]} (parse-registerreact content)]
+      (cond
+        (or (nil? trigger) (str/blank? trigger))
+        (send! channel-id :content "Usage: !registerreact \"trigger\" \"reply\"  (or attach a file)")
+
+        (and (or (nil? reply) (str/blank? reply))
+             (empty? attachments))
+        (send! channel-id :content "Attach a file or provide a reply: !registerreact \"sandwich\" \"did you mean sandos?\"")
+
+        :else
+        (let [author-id (get-in author [:id])]
+          (if (and reply (not (str/blank? reply)))
+            (do
+              (reacts/register-text! trigger reply author-id)
+              (send! channel-id :content (str "✅ React registered for `" trigger "`."))
+              nil)
+            (let [att (first attachments)
+                  {:keys [ok? message file]} (reacts/register-attachment! trigger att author-id)]
+              (if ok?
+                (send! channel-id :content (str "✅ React registered for `" trigger "` → `" file "`."))
                 (send! channel-id :content (str "❌ " message))))))))))
+
+(defn handle-message [{:keys [content channel-id] :as msg}]
+  (let [cmd (first (str/split (or content "") #"\s+"))]
+    (if-let [cmd-fn (@commands cmd)]
+      (cmd-fn msg)
+      ;; fallback: custom command lookup
+      (when-let [f (custom/registered-file cmd)]
+        (send-file! channel-id f)))))
