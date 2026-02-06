@@ -1,105 +1,126 @@
-(ns pigeonbot.discord
-  (:require [clojure.core.async :as a]
+(ns pigeonbot.custom-commands
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string :as str]
-            [discljord.connections :as c]
-            [discljord.events :as e]
-            [discljord.messaging :as m]
-            [pigeonbot.channels :as channels]
-            [pigeonbot.commands :as commands]
-            [pigeonbot.config :as config]
-            [pigeonbot.custom-commands :as custom]
-            [pigeonbot.discljord-patch :as djpatch]
-            [pigeonbot.reaction-roles :as rr]
-            [pigeonbot.state :refer [state]]))
+            [pigeonbot.config :as config]))
 
-(defonce seen-events* (atom #{}))
-(defonce bot-future (atom nil))
+(def ^:private registry-path
+  "EDN file in repo root storing custom commands."
+  "custom_commands.edn")
 
-(defn handle-event [event-type event-data]
-  (when-not (contains? @seen-events* event-type)
-    (swap! seen-events* conj event-type)
-    (println "EVENT TYPE:" event-type))
+(def ^:private custom-media-dir
+  "Directory under src/ where custom media gets stored.
+   Stored :file in registry is relative to src/pigeonbot/media/."
+  "src/pigeonbot/media/custom/")
 
-  (when (and event-type (str/includes? (name event-type) "reaction"))
-    (println "REACTION-ish EVENT:" event-type
-             (select-keys event-data [:guild-id :channel-id :message-id :user-id :emoji])))
+(defonce ^{:doc "Map: \"!moo\" -> {:file \"custom/moo.png\" :added-by \"123\" :added-at 1234567890}"}
+  registry*
+  (atom {}))
 
-  (case event-type
-    :message-create (commands/handle-message event-data)
-    :message-reaction-add (rr/handle-reaction-add! event-data)
-    :message-reaction-remove (rr/handle-reaction-remove! event-data)
-    nil))
+(defn- ensure-dir! [path]
+  (let [d (io/file path)]
+    (.mkdirs d)
+    d))
 
-(defn start-bot
-  "Connect to Discord and start the event pump (blocking)."
+(defn load!
+  "Load registry from disk (if present). Safe to call multiple times."
   []
-  (channels/load-channels!)
-  (custom/load!)          ;; <-- THIS is what restores custom commands on restart
-  (djpatch/patch-discljord!)
+  (ensure-dir! custom-media-dir)
+  (let [f (io/file registry-path)]
+    (reset! registry*
+            (if (.exists f)
+              (try
+                (edn/read-string (slurp f))
+                (catch Throwable t
+                  (println "custom-commands/load!: failed to read" registry-path ":" (.getMessage t))
+                  {}))
+              {})))
+  @registry*)
 
-  (let [{:keys [token]} (config/load-config)
-        event-ch (a/chan 100)
-
-        reaction-intent (or (when (contains? c/gateway-intents :guild-message-reactions)
-                              :guild-message-reactions)
-                            (when (contains? c/gateway-intents :guild-message-reaction)
-                              :guild-message-reaction)
-                            (when (contains? c/gateway-intents :guild-message-reaction-add)
-                              :guild-message-reaction-add)
-                            (when (contains? c/gateway-intents :guild-message-reaction-events)
-                              :guild-message-reaction-events))
-
-        intents (cond-> #{:guilds :guild-messages}
-                  reaction-intent (conj reaction-intent))
-
-        conn   (c/connect-bot! token event-ch :intents intents)
-        msg-ch (m/start-connection! token)]
-
-    (println "Gateway intents:" intents)
-    (when-not reaction-intent
-      (println "WARNING: Could not find a reaction intent keyword in discljord.connections/gateway-intents"))
-
-    (reset! state {:connection conn :events event-ch :messaging msg-ch})
-    (println "Connected to Discord (online)")
-    (e/message-pump! event-ch handle-event)))
-
-(defn start-bot!
-  "Starts the bot in the background and returns the messaging handle."
+(defn save!
+  "Persist registry to disk."
   []
-  (reset! bot-future (future (start-bot)))
-  (loop [tries 0]
-    (if-let [msg (:messaging @state)]
-      msg
-      (if (< tries 20)
-        (do (Thread/sleep 250) (recur (inc tries)))
-        (do (println "start-bot!: timed out waiting for messaging connection.") nil)))))
+  (spit registry-path (pr-str @registry*))
+  @registry*)
 
-(defn stop-bot!
-  "Best-effort stop of the running bot."
-  []
-  (let [{:keys [events connection messaging]} @state]
-    (println "Stopping bot connections…")
+(def ^:private max-bytes (* 8 1024 1024))
 
-    (when events
-      (try (a/close! events)
-           (catch Throwable t (println "stop-bot!: close events failed:" (.getMessage t)))))
+(defn valid-name?
+  [s]
+  (boolean (re-matches #"[a-zA-Z][a-zA-Z0-9_-]{1,31}" (or s ""))))
 
-    (when connection
-      (try (c/disconnect-bot! connection)
-           (catch Throwable t (println "stop-bot!: disconnect-bot! failed:" (.getMessage t)))))
+(defn normalize-command [name]
+  (str "!" name))
 
-    (when messaging
-      (try (m/stop-connection! messaging)
-           (catch Throwable t (println "stop-bot!: stop-connection! failed:" (.getMessage t))))))
+(defn- safe-ext [filename]
+  (let [lower (-> (or filename "") str/lower-case)]
+    (cond
+      (str/ends-with? lower ".png")  ".png"
+      (str/ends-with? lower ".gif")  ".gif"
+      (str/ends-with? lower ".jpg")  ".jpg"
+      (str/ends-with? lower ".jpeg") ".jpeg"
+      (str/ends-with? lower ".webp") ".webp"
+      (str/ends-with? lower ".mp4")  ".mp4"
+      :else nil)))
 
-  (when-let [f @bot-future]
-    (future-cancel f))
-  (reset! bot-future nil)
-  (reset! state {})
-  (println "Bot stopped."))
+(defn allowed-to-register?
+  "Default: allow everyone.
+   If config.edn contains :command-admin-ids [\"123\" \"456\"], only allow those."
+  [{:keys [author]}]
+  (let [uid (get-in author [:id])
+        cfg (try (config/load-config) (catch Throwable _ {}))
+        admins (set (map str (or (:command-admin-ids cfg) [])))]
+    (or (empty? admins)
+        (contains? admins (str uid)))))
 
-(defn restart-bot! []
-  (println "Restarting pigeonbot…")
-  (stop-bot!)
-  (Thread/sleep 500)
-  (start-bot!))
+(defn- download-url->file!
+  [url ^java.io.File out-file]
+  (with-open [in  (io/input-stream (java.net.URL. url))
+              out (io/output-stream out-file)]
+    (io/copy in out))
+  out-file)
+
+(defn register-from-attachment!
+  "Register a custom command from a Discord attachment map."
+  [cmd attachment author-id]
+  (let [{:keys [url filename size]} attachment
+        ext (safe-ext filename)
+        size (or size 0)]
+    (cond
+      (nil? url)
+      {:ok? false :reason :no-url :message "Attachment has no URL (can’t download)."}
+
+      (nil? ext)
+      {:ok? false :reason :bad-type :message "Unsupported file type. Use png/gif/jpg/webp/mp4."}
+
+      (> (long size) (long max-bytes))
+      {:ok? false :reason :too-large :message (str "File too large (" size " bytes).")}
+
+      :else
+      (do
+        (ensure-dir! custom-media-dir)
+        (let [basename (subs cmd 1)
+              out-name (str basename ext)
+              rel-path (str "custom/" out-name)
+              out-file (io/file custom-media-dir out-name)]
+          (try
+            (download-url->file! url out-file)
+            (swap! registry* assoc cmd
+                   {:file rel-path
+                    :added-by (str author-id)
+                    :added-at (System/currentTimeMillis)})
+            (save!)
+            {:ok? true :cmd cmd :file rel-path}
+            (catch Throwable t
+              (println "custom-commands/register-from-attachment!: failed:" (.getMessage t))
+              {:ok? false :reason :download-failed :message "Failed to download/save that attachment."})))))))
+
+(defn lookup-file [cmd]
+  (get @registry* cmd))
+
+(defn registered-file
+  "Return java.io.File for a registered cmd, or nil if missing."
+  [cmd]
+  (when-let [{:keys [file]} (lookup-file cmd)]
+    (let [f (io/file "src/pigeonbot/media" file)]
+      (when (.exists f) f))))
