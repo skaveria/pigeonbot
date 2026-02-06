@@ -3,7 +3,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [pigeonbot.config :as config]))
-
+; yay it works 
 (def ^:private registry-path
   "EDN file in repo root storing custom commands."
   "custom_commands.edn")
