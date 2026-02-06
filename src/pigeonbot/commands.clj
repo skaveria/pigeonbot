@@ -215,6 +215,9 @@
         {:trigger (nth m 1)
          :reply   (nth m 2)}))))
 
+; fixed registering images 
+
+
 (defcmd "!registerreact"
   "Register a keyword reaction: !registerreact \"trigger\" \"reply\" OR !registerreact \"trigger\" + attach"
   [{:keys [channel-id content attachments author] :as msg}]
