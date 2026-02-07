@@ -105,7 +105,7 @@
               (try
                 (log! "vision-reacts: calling OpenClaw opossum-in-image-debug ...")
                 (let [{:keys [opossum? raw parsed status] :as dbg}
-                      (oc/opossum-in-image-debug clean-url content-type)]
+                      (oc/opossum-in-image-debug clean-url)]
                   (log! "vision-reacts: OpenClaw dbg =" (pr-str (select-keys dbg [:status :opossum? :parsed])))
                   (log! "vision-reacts: OpenClaw raw =" (pr-str raw))
                   (when opossum?
