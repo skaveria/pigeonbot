@@ -32,7 +32,9 @@
                        :content (or content "")
                        :file file
                        :allowed_mentions allowed-mentions)
-    (do (println "send!: messaging is nil (bot not ready?)") nil)))
+    (do
+      (println "send!: messaging is nil (bot not ready?)")
+      nil)))
 
 (defn send-reply!
   "Reply to a specific message id in the same channel, without pinging replied user."
@@ -44,33 +46,38 @@
                        :file file
                        :message_reference {:message_id (str reply-to-message-id)}
                        :allowed_mentions {:replied_user false})
-    (do (println "send-reply!: messaging is nil (bot not ready?)") nil)))
+    (do
+      (println "send-reply!: messaging is nil (bot not ready?)")
+      nil)))
 
 (defn send-file!
-  "Built-in local media only. Custom uploads use CDN URLs."
+  "Built-in local media only (custom commands should use CDN URLs).
+  Uses a temp-copy + timeout so weird files don't hang forever."
   [channel-id ^java.io.File f]
   (let [path (some-> f .getAbsolutePath)]
     (cond
-      (nil? f) (do (println "send-file!: file is nil") nil)
+      (nil? f)
+      (do (println "send-file!: file is nil") nil)
+
       (not (.exists f))
       (do (println "send-file!: missing file" {:file path})
           (send! channel-id :content (str "⚠️ Missing media file: `" (.getName f) "`"))
           nil)
+
       :else
       (let [tmp (temp-copy f (.getName f))
             ch  (send! channel-id :content "" :file tmp)]
         (async/go
-          (cond
-            (nil? ch)
+          (if (nil? ch)
             (println "send-file!: no channel (bot not ready?)" {:file path})
-            :else
             (let [[resp port] (async/alts! [ch (async/timeout upload-timeout-ms)])]
-              (cond
-                (= port ch)
+              (if (= port ch)
                 (when (and (map? resp) (:error resp))
                   (println "send-file!: discljord error:" (pr-str resp)))
-                :else
                 (do
-                  (println "send-file!: TIMEOUT sending attachment" {:file path :size (.length f)})
-                  (send! channel-id :content "⚠️ Upload timed out; try again or re-encode.")))))))
-        ch)))
+                  (println "send-file!: TIMEOUT sending attachment"
+                           {:file path :size (.length f)})
+                  (send! channel-id
+                         :content (str "⚠️ Upload timed out for `" (.getName f) "`. "
+                                       "Try again or re-encode the file.")))))))
+        ch))))
