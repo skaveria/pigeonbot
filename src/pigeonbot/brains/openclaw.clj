@@ -81,14 +81,19 @@
 
         ep (endpoint url "/v1/chat/completions")
 
-        ;; OpenAI-style multimodal message content:
-        ;; [{type:text,text:"..."},{type:image_url,image_url:{url:"..."}}]
+        ;; Ask for strict JSON so we don't rely on "YES"/"NO" formatting.
         payload {:model "openclaw"
-                 :messages [{:role "user"
-                             :content [{:type "text"
-                                        :text "Look at the image and answer ONLY YES or NO: does it contain an opossum (possum)? If unsure, answer NO."}
-                                       {:type "image_url"
-                                        :image_url {:url image-url}}]}]}
+                 :messages
+                 [{:role "user"
+                   :content
+                   [{:type "text"
+                     :text (str
+                            "Look at the image and decide if it contains an opossum (possum). "
+                            "Reply with ONLY valid JSON, no markdown, no extra keys, no commentary.\n"
+                            "Format exactly: {\"opossum\": true} or {\"opossum\": false}\n"
+                            "If unsure, use false.")}
+                    {:type "image_url"
+                     :image_url {:url image-url}}]}]}
 
         headers {"Authorization" (str "Bearer " token)
                  "Content-Type" "application/json"
@@ -106,5 +111,18 @@
         (throw (ex-info "OpenClaw returned non-2xx" {:status status :body body :endpoint ep}))
 
         :else
-        (let [txt (-> (extract-content body) str str/trim str/upper-case)]
-          (boolean (re-find #"^YES\b" txt)))))))
+        (let [txt (-> (extract-content body) str str/trim)]
+          ;; Try strict JSON first.
+          (try
+            (let [m (json/decode txt true)
+                  v (:opossum m)]
+              (boolean v))
+            (catch Throwable _
+              ;; Fallback heuristic if model didn't obey JSON:
+              ;; treat any mention of "opossum"/"possum" as true unless it explicitly negates.
+              (let [u (str/upper-case txt)]
+                (cond
+                  (re-find #"\bNO\b" u) false
+                  (re-find #"\bOPOSSUM\b" u) true
+                  (re-find #"\bPOSSUM\b" u) true
+                  :else false)))))))))
