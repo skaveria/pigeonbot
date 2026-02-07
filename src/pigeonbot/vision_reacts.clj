@@ -11,7 +11,7 @@
 
 (defonce ^:private reacted-message-ids* (atom #{}))
 
-(def ^:private default-emoji "🦝") ;; temp default for debugging
+(def ^:private default-emoji ":tposs:") ;; temp default for debugging
 
 (defn- cfg []
   (let [m (config/load-config)]
