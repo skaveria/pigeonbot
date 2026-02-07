@@ -104,6 +104,18 @@
       :else
       (str "data:" ct ";base64," (b64 ^bytes body)))))
 
+
+(defn- extract-json-object
+  "Pull the last {...} block out of a string (best-effort).
+  Returns map or nil."
+  [^String s]
+  (when (seq s)
+    (let [ms (re-seq #"\{[^{}]*\}" s)]
+      (when-let [last-json (last ms)]
+        (try
+          (json/decode last-json true)
+          (catch Throwable _ nil))))))
+
 (defn opossum-in-image-debug
   "Returns {:opossum? boolean :raw string :parsed map|nil :status int}.
   Fetches the Discord CDN image and sends it as a base64 data URL."
@@ -147,18 +159,14 @@
 
         :else
         (let [raw (-> (extract-content body) str str/trim)
-              parsed (try (json/decode raw true) (catch Throwable _ nil))
-              op? (cond
-                    (boolean? (:opossum parsed)) (:opossum parsed)
-                    (re-find #"\bopossum\b" (str/lower-case raw)) true
-                    (re-find #"\bpossum\b" (str/lower-case raw)) true
-                    :else false)]
-          {:opossum? (boolean op?)
+              parsed (extract-json-object raw)
+              op? (true? (:opossum parsed))]
+          {:opossum? (boolean op?)   ;; ONLY trust parsed JSON
            :raw raw
            :parsed parsed
            :status status})))))
 
 (defn opossum-in-image?
-  "Returns true/false."
+  "Returns true/false (JSON-only; no risky heuristics)."
   [image-url content-type]
   (:opossum? (opossum-in-image-debug image-url content-type)))
