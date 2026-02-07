@@ -215,7 +215,7 @@
                   {:keys [ok? message]} (custom/register-from-attachment! cmd att author-id)]
               (if ok?
                 (send! channel-id :content (str "✅ Registered `" cmd "` (CDN link saved)."))
-                (send! channel-id :content (str "❌ " message)))))))))))
+                (send! channel-id :content (str "❌ " message))))))))))
 
 (defcmd "!delcommand" "Delete custom command: !delcommand <name>"
   [{:keys [channel-id content] :as msg}]
