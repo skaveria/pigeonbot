@@ -260,3 +260,42 @@
                   (when (.exists f)
                     (send-file! channel-id f)))
           nil)))))
+
+(defcmd "!delcommand"
+  "Delete a custom command: !delcommand <name>"
+  [{:keys [channel-id content author] :as msg}]
+  (let [[_ name] (clojure.string/split (or content "") #"\s+" 2)
+        cmd (when name (pigeonbot.custom-commands/normalize-command name))]
+    (cond
+      (nil? cmd)
+      (send! channel-id :content "Usage: !delcommand <name>")
+
+      (not (pigeonbot.custom-commands/allowed-to-register? msg))
+      (send! channel-id :content "❌ You’re not allowed to delete commands.")
+
+      (not (pigeonbot.custom-commands/lookup cmd))
+      (send! channel-id :content (str "No such command `" cmd "`."))
+
+      :else
+      (do
+        (swap! pigeonbot.custom-commands/registry* dissoc cmd)
+        (pigeonbot.custom-commands/save!)
+        (send! channel-id :content (str "🗑️ Deleted `" cmd "`."))))))
+
+(defcmd "!delreact"
+  "Delete a keyword react: !delreact \"trigger\""
+  [{:keys [channel-id content author] :as msg}]
+  (let [[_ trigger] (re-matches #"!\s*delreact\s+\"([^\"]+)\"" (or content ""))]
+    (cond
+      (nil? trigger)
+      (send! channel-id :content "Usage: !delreact \"trigger\"")
+
+      (not (pigeonbot.message-reacts/allowed-to-register? msg))
+      (send! channel-id :content "❌ You’re not allowed to delete reacts.")
+
+      :else
+      (do
+        (swap! pigeonbot.message-reacts/rules*
+               #(remove (fn [r] (= (:trigger r) trigger)) %))
+        (pigeonbot.message-reacts/save!)
+        (send! channel-id :content (str "🗑️ Deleted reacts for `" trigger "`."))))))
