@@ -35,6 +35,13 @@
         (re-find #"\.(png|jpe?g|gif|webp)$" (str/lower-case fn))
         (re-find #"\.(png|jpe?g|gif|webp)$" (str/lower-case u)))))
 
+(defn- strip-query
+  "Remove everything after '?' (inclusive)."
+  [u]
+  (let [u (-> (str u) str/trim)
+        i (.indexOf ^String u "?")]
+    (if (neg? i) u (subs u 0 i))))
+
 (defn- first-image-attachment
   "Return {:url ... :proxy-url ... :content-type ...} for first image attachment, else nil."
   [msg]
@@ -51,14 +58,7 @@
        :proxy-url (or (:proxy-url att) (:proxy_url att))
        :content-type (or (:content-type att) (:content_type att) (:contentType att))})))
 
-(defn- normalize-emoji
-  "Accepts:
-   - unicode emoji (\"🦝\")
-   - \":tposs:\" (name only; may or may not work for custom)
-   - \"tposs:123\"
-   - \"<:tposs:123>\"
-  Returns a string to pass to discljord create-reaction!."
-  [s]
+(defn- normalize-emoji [s]
   (let [s (str/trim (str s))]
     (cond
       (re-matches #"^<a?:[A-Za-z0-9_]+:\d+>$" s) s
@@ -92,17 +92,19 @@
 
       :else
       (let [{:keys [url proxy-url content-type]} (first-image-attachment msg)
-            fetch-url (or proxy-url url)]
-        (if-not (seq (str fetch-url))
+            ;; prefer proxy-url but strip ALL querystrings so we never get trailing '&' or signed params
+            clean-url (some-> (or proxy-url url) strip-query)]
+        (if-not (seq (str clean-url))
           (do (log! "vision-reacts: no image url found; skip") nil)
           (do
             (swap! reacted-message-ids* conj mid)
-            (log! "vision-reacts: image url =" fetch-url "content-type =" (or content-type ""))
+            (log! "vision-reacts: image url =" (or proxy-url url) "content-type =" (or content-type ""))
+            (log! "vision-reacts: clean url =" clean-url)
             (future
               (try
                 (log! "vision-reacts: calling OpenClaw opossum-in-image-debug ...")
                 (let [{:keys [opossum? raw parsed status] :as dbg}
-                      (oc/opossum-in-image-debug fetch-url content-type)]
+                      (oc/opossum-in-image-debug clean-url content-type)]
                   (log! "vision-reacts: OpenClaw dbg =" (pr-str (select-keys dbg [:status :opossum? :parsed])))
                   (log! "vision-reacts: OpenClaw raw =" (pr-str raw))
                   (when opossum?
