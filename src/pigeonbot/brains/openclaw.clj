@@ -66,12 +66,6 @@
 ;; Vision helper
 ;; -----------------------------------------------------------------------------
 
-(defn opossum-in-image?
-  "Returns true/false."
-  [image-url]
-  (:opossum? (opossum-in-image-debug image-url)))
-
-
 (defn opossum-in-image-debug
   "Like opossum-in-image?, but returns a debug map:
   {:opossum? boolean
@@ -130,3 +124,9 @@
            :raw raw
            :parsed parsed
            :status status})))))
+
+
+(defn opossum-in-image?
+  "Returns true/false."
+  [image-url]
+  (:opossum? (opossum-in-image-debug image-url)))
