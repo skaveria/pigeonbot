@@ -145,47 +145,40 @@
       (catch Throwable _ nil))))
 
 (defn opossum-in-image-debug
-  "Returns {:opossum? boolean :raw string :parsed map|nil :status int}."
-  [image-url content-type]
+  "Ask OpenClaw to classify the image at a URL.
+  Relies on the OpenClaw agent to fetch and analyze the image."
+  [image-url]
   (let [{:keys [url agent-id token timeout]} (cfg)
-        _ (when-not (seq token)
-            (throw (ex-info "Missing OpenClaw token" {})))
-
-        data-url (->data-url image-url content-type)
-
         ep (endpoint url "/v1/chat/completions")
-        payload {:model "openclaw"
-                 :messages
-                 [{:role "user"
-                   :content
-                   [{:type "text"
-                     :text (str
-                            "You are a strict vision classifier.\n"
-                            "Return ONLY JSON: {\"opossum\": true} or {\"opossum\": false}.\n"
-                            "No markdown, no backticks, no explanation.\n"
-                            "If unsure, use false.")}
-                    {:type "image_url"
-                     :image_url {:url data-url}}]}]}
-        headers {"Authorization" (str "Bearer " token)
-                 "Content-Type" "application/json"
-                 "x-openclaw-agent-id" agent-id}]
+        prompt (str
+                 "Look at the image at the following URL and decide if it contains an opossum (possum).\n"
+                 "URL: " image-url "\n\n"
+                 "Reply with ONLY valid JSON: {\"opossum\": true} or {\"opossum\": false}.\n"
+                 "No explanation.")]
     (let [{:keys [status body error]}
-          @(http/post ep {:headers headers
-                          :body (json/encode payload)
-                          :timeout timeout})]
+          @(http/post ep
+                      {:headers {"Authorization" (str "Bearer " token)
+                                 "Content-Type" "application/json"
+                                 "x-openclaw-agent-id" agent-id}
+                       :body (json/encode
+                               {:model "openclaw"
+                                :messages [{:role "user" :content prompt}]})
+                       :timeout timeout})]
       (cond
         error
-        (throw (ex-info "OpenClaw request failed" {:error (str error)}))
+        (throw (ex-info "OpenClaw request failed" {:error error}))
+
         (not (<= 200 status 299))
         (throw (ex-info "OpenClaw non-2xx" {:status status :body body}))
+
         :else
-        (let [raw    (-> (extract-content body) str str/trim)
-              parsed (extract-json-object raw)]
+        (let [raw (-> (extract-content body) str str/trim)
+              parsed (try (json/decode raw true) (catch Throwable _ nil))]
           {:opossum? (true? (:opossum parsed))
            :raw raw
            :parsed parsed
            :status status})))))
 
 (defn opossum-in-image?
-  [image-url content-type]
-  (:opossum? (opossum-in-image-debug image-url content-type)))
+  [image-url]
+  (:opossum? (opossum-in-image-debug image-url)))
