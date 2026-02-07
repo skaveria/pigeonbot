@@ -35,7 +35,9 @@
         (re-find #"\.(png|jpe?g|gif|webp)$" (str/lower-case fn))
         (re-find #"\.(png|jpe?g|gif|webp)$" (str/lower-case u)))))
 
-(defn- first-image-url [msg]
+(defn- first-image-attachment
+  "Return {:url ... :content-type ...} for first image attachment, else nil."
+  [msg]
   (let [atts (or (:attachments msg) [])]
     (log! "vision-reacts: attachments count =" (count atts))
     (when (seq atts)
@@ -44,10 +46,9 @@
             (pr-str (select-keys (first atts)
                                  [:id :filename :url :proxy-url :proxy_url :size
                                   :content_type :content-type :contentType]))))
-    (some->> atts
-             (filter image-attachment?)
-             first
-             :url)))
+    (when-let [att (->> atts (filter image-attachment?) first)]
+      {:url (:url att)
+       :content-type (or (:content-type att) (:content_type att) (:contentType att))})))
 
 (defn- normalize-emoji
   "Accepts:
@@ -82,37 +83,26 @@
   [{:keys [id channel-id content] :as msg}]
   (let [mid (some-> id str)]
     (cond
-      (nil? id)
-      (do (log! "vision-reacts: skip (no id)") nil)
-
-      (nil? channel-id)
-      (do (log! "vision-reacts: skip (no channel-id)") nil)
-
-      (bot-message? msg)
-      (do (log! "vision-reacts: skip (author is bot)") nil)
-
-      (command-message? content)
-      (do (log! "vision-reacts: skip (command message)" (pr-str content)) nil)
-
-      (contains? @reacted-message-ids* mid)
-      (do (log! "vision-reacts: skip (already processed)" mid) nil)
+      (nil? id) (do (log! "vision-reacts: skip (no id)") nil)
+      (nil? channel-id) (do (log! "vision-reacts: skip (no channel-id)") nil)
+      (bot-message? msg) (do (log! "vision-reacts: skip (author is bot)") nil)
+      (command-message? content) (do (log! "vision-reacts: skip (command message)" (pr-str content)) nil)
+      (contains? @reacted-message-ids* mid) (do (log! "vision-reacts: skip (already processed)" mid) nil)
 
       :else
-      (let [img (first-image-url msg)]
-        (if-not (seq (str img))
+      (let [{:keys [url content-type] :as att} (first-image-attachment msg)]
+        (if-not (seq (str url))
           (do (log! "vision-reacts: no image url found; skip") nil)
           (do
             (swap! reacted-message-ids* conj mid)
-            (log! "vision-reacts: image url =" img)
+            (log! "vision-reacts: image url =" url "content-type =" (or content-type ""))
             (future
               (try
                 (log! "vision-reacts: calling OpenClaw opossum-in-image-debug ...")
                 (let [{:keys [opossum? raw parsed status] :as dbg}
-                      (oc/opossum-in-image-debug img)]
-                  (log! "vision-reacts: OpenClaw dbg ="
-                        (pr-str (select-keys dbg [:status :opossum? :parsed])))
+                      (oc/opossum-in-image-debug url content-type)]
+                  (log! "vision-reacts: OpenClaw dbg =" (pr-str (select-keys dbg [:status :opossum? :parsed])))
                   (log! "vision-reacts: OpenClaw raw =" (pr-str raw))
-
                   (when opossum?
                     (let [emoji (chosen-emoji)
                           ch (react! channel-id id emoji)
@@ -121,7 +111,6 @@
                       (log! "vision-reacts: reaction response =" (pr-str resp)))))
 
                 (catch Throwable t
-                  ;; allow future retries if OpenClaw was down; remove from processed set
                   (swap! reacted-message-ids* disj mid)
                   (log! "vision-reacts: ERROR:" (.getMessage t) (or (ex-data t) {})))))
             true))))))
