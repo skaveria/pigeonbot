@@ -35,6 +35,11 @@
         (re-find #"\.(png|jpe?g|gif|webp)$" (str/lower-case fn))
         (re-find #"\.(png|jpe?g|gif|webp)$" (str/lower-case u)))))
 
+(defn- strip-trailing-junk
+  "Keep the querystring, but strip trailing &/? that causes '&&'."
+  [u]
+  (-> (str u) str/trim (clojure.string/replace #"[?&]+$" "")))
+
 (defn- strip-query
   "Remove everything after '?' (inclusive)."
   [u]
@@ -93,7 +98,7 @@
       :else
       (let [{:keys [url proxy-url content-type]} (first-image-attachment msg)
             ;; prefer proxy-url but strip ALL querystrings so we never get trailing '&' or signed params
-            clean-url (some-> (or proxy-url url) strip-query)]
+            clean-url (some-> (or proxy-url url) strip-trailing-junk)]
         (if-not (seq (str clean-url))
           (do (log! "vision-reacts: no image url found; skip") nil)
           (do
