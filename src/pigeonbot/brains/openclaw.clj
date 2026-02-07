@@ -13,131 +13,119 @@
   (let [m (config/load-config)]
     {:url      (or (:openclaw-url m) "http://127.0.0.1:18789")
      :agent-id (or (:openclaw-agent-id m) "main")
-     ;; prefer config.edn, fallback to env
-     :token    (or (:openclaw-token m) (System/getenv "OPENCLAW_GATEWAY_TOKEN"))
+     :token    (or (:openclaw-token m)
+                    (System/getenv "OPENCLAW_GATEWAY_TOKEN"))
      :timeout  (long (or (:brain-timeout-ms m) 60000))}))
 
 (defn- endpoint [base path]
   (str (str/replace (or base "") #"/+$" "") path))
 
-(defn- decode-body [body]
-  (cond
-    (nil? body) {}
-    (map? body) body
-    (string? body) (json/decode body true)
-    :else {}))
-
 (defn- extract-content [resp-body]
-  (let [m (decode-body resp-body)]
+  (let [m (cond
+            (string? resp-body) (json/decode resp-body true)
+            (map? resp-body) resp-body
+            :else {})]
     (or (get-in m [:choices 0 :message :content])
         (get-in m [:error :message])
         (str resp-body))))
 
 ;; -----------------------------------------------------------------------------
-;; Text/chat
+;; Base64 helpers
+;; -----------------------------------------------------------------------------
+
+(defn- b64 ^String [^bytes bs]
+  (.encodeToString (Base64/getEncoder) bs))
+
+(def ^:private max-image-bytes (* 8 1024 1024)) ;; 8MB cap before base64
+
+(defn- normalize-discord-url
+  "Keep the signed querystring (needed), but remove trailing '&' or '?' which causes '&&' issues."
+  [u]
+  (-> (str u)
+      str/trim
+      (str/replace #"[?&]+$" "")))
+
+(defn- ->data-url
+  "Fetch image bytes, base64 them, return a data URL.
+  IMPORTANT: we do NOT append any resize params; we fetch the URL exactly (after trimming trailing &/?)."
+  [url content-type]
+  (let [fetch-url (normalize-discord-url url)
+        ct        (or (some-> content-type str str/trim not-empty)
+                      "image/png")
+        {:keys [status body error]}
+        @(http/get fetch-url {:as :byte-array :timeout 30000})]
+    (cond
+      error
+      (throw (ex-info "Image fetch failed"
+                      {:url fetch-url :error (str error)}))
+
+      (or (nil? status) (not (<= 200 status 299)))
+      (throw (ex-info "Image fetch returned non-2xx"
+                      {:url fetch-url :status status}))
+
+      (nil? body)
+      (throw (ex-info "Image fetch returned empty body"
+                      {:url fetch-url}))
+
+      (> (alength ^bytes body) max-image-bytes)
+      (throw (ex-info "Image too large to inline"
+                      {:url fetch-url
+                       :bytes (alength ^bytes body)
+                       :max max-image-bytes}))
+
+      :else
+      (str "data:" ct ";base64," (b64 body)))))
+
+;; -----------------------------------------------------------------------------
+;; Text chat
 ;; -----------------------------------------------------------------------------
 
 (defn ask-with-context
-  "Call OpenClaw OpenAI-compatible /v1/chat/completions and return assistant content.
-  Context is merged into the user message."
   [context-text question]
   (let [{:keys [url agent-id token timeout]} (cfg)
-        _ (when-not (and (string? token) (seq token))
-            (throw (ex-info "Missing OpenClaw gateway token (set :openclaw-token in config.edn or OPENCLAW_GATEWAY_TOKEN)"
-                            {})))
+        _ (when-not (seq token)
+            (throw (ex-info "Missing OpenClaw token" {})))
         ctx (str/trim (or context-text ""))
         q   (str/trim (str question))
         user (if (seq ctx)
-               (str "Recent chat:\n" ctx "\n\nNow respond to this message:\n" q)
+               (str "Recent chat:\n" ctx "\n\nNow respond:\n" q)
                q)
         ep (endpoint url "/v1/chat/completions")
         payload {:model "openclaw"
                  :messages [{:role "user" :content user}]}
         headers {"Authorization" (str "Bearer " token)
                  "Content-Type" "application/json"
-                 "x-openclaw-agent-id" (str agent-id)}]
-
+                 "x-openclaw-agent-id" agent-id}]
     (let [{:keys [status body error]}
           @(http/post ep {:headers headers
                           :body (json/encode payload)
                           :timeout timeout})]
       (cond
         error
-        (throw (ex-info "OpenClaw request failed" {:error (str error) :endpoint ep}))
-
-        (or (nil? status) (not (<= 200 status 299)))
-        (throw (ex-info "OpenClaw returned non-2xx" {:status status :body body :endpoint ep}))
-
+        (throw (ex-info "OpenClaw request failed" {:error (str error)}))
+        (not (<= 200 status 299))
+        (throw (ex-info "OpenClaw non-2xx" {:status status :body body}))
         :else
         (extract-content body)))))
 
 ;; -----------------------------------------------------------------------------
-;; Vision (download -> data URL so the model actually receives pixels)
+;; Vision: OPOSSUM DETECTOR (JSON-only)
 ;; -----------------------------------------------------------------------------
 
-(def ^:private max-image-bytes (* 6 1024 1024)) ;; 6MB cap; tune if needed
-
-(defn- b64 ^String [^bytes bs]
-  (.encodeToString (Base64/getEncoder) bs))
-
-(def ^:private max-image-bytes (* 2 1024 1024)) ;; 2MB cap AFTER resize
-
-(defn- add-discord-resize-params
-  "Discord media proxy supports width/quality; add if missing."
-  [u]
-  (let [u (str u)
-        sep (if (str/includes? u "?") "&" "?")]
-    (str u sep "width=512&quality=70")))
-
-(defn- ->data-url
-  "Fetch an image from a URL and convert to data URL.
-  If the URL is a Discord media proxy URL, request a resized version to keep payload small."
-  [url content-type]
-  (let [url0 (str url)
-        url1 (if (str/includes? url0 "media.discordapp.net")
-               (add-discord-resize-params url0)
-               url0)
-        ct  (or (some-> content-type str str/trim not-empty) "image/png")
-        {:keys [status body error]} @(http/get url1 {:as :byte-array :timeout 30000})]
-    (cond
-      error
-      (throw (ex-info "Failed to fetch image bytes" {:url url1 :error (str error)}))
-
-      (or (nil? status) (not (<= 200 status 299)))
-      (throw (ex-info "Image fetch returned non-2xx" {:url url1 :status status}))
-
-      (nil? body)
-      (throw (ex-info "Image fetch returned empty body" {:url url1 :status status}))
-
-      (> (alength ^bytes body) max-image-bytes)
-      (throw (ex-info "Image too large even after resize"
-                      {:url url1 :bytes (alength ^bytes body) :max max-image-bytes}))
-
-      :else
-      (str "data:" ct ";base64," (b64 ^bytes body)))))
-
-
 (defn- extract-json-object
-  "Pull the last {...} block out of a string (best-effort).
-  Returns map or nil."
+  "Extract last {...} JSON object from text."
   [^String s]
-  (when (seq s)
-    (let [ms (re-seq #"\{[^{}]*\}" s)]
-      (when-let [last-json (last ms)]
-        (try
-          (json/decode last-json true)
-          (catch Throwable _ nil))))))
+  (when-let [ms (seq (re-seq #"\{[^{}]*\}" (or s "")))]
+    (try
+      (json/decode (last ms) true)
+      (catch Throwable _ nil))))
 
 (defn opossum-in-image-debug
-  "Returns {:opossum? boolean :raw string :parsed map|nil :status int}.
-  Fetches the Discord CDN image and sends it as a base64 data URL."
+  "Returns {:opossum? boolean :raw string :parsed map|nil :status int}."
   [image-url content-type]
   (let [{:keys [url agent-id token timeout]} (cfg)
-        _ (when-not (and (string? token) (seq token))
-            (throw (ex-info "Missing OpenClaw gateway token" {})))
-        image-url (str/trim (str image-url))
-        _ (when-not (seq image-url)
-            (throw (ex-info "opossum-in-image-debug: missing image-url" {})))
+        _ (when-not (seq token)
+            (throw (ex-info "Missing OpenClaw token" {})))
 
         data-url (->data-url image-url content-type)
 
@@ -147,38 +135,29 @@
                  [{:role "user"
                    :content
                    [{:type "text"
-                     :text (str
-                            "Look at the image and decide if it contains an opossum (possum).\n"
-                            "Reply with ONLY valid JSON, no markdown, no extra text.\n"
-                            "Exactly: {\"opossum\": true} or {\"opossum\": false}\n"
-                            "If unsure, use false.")}
+                     :text "Return ONLY JSON: {\"opossum\": true} or {\"opossum\": false}. No commentary."}
                     {:type "image_url"
                      :image_url {:url data-url}}]}]}
         headers {"Authorization" (str "Bearer " token)
                  "Content-Type" "application/json"
-                 "x-openclaw-agent-id" (str agent-id)}]
-
+                 "x-openclaw-agent-id" agent-id}]
     (let [{:keys [status body error]}
           @(http/post ep {:headers headers
                           :body (json/encode payload)
                           :timeout timeout})]
       (cond
         error
-        (throw (ex-info "OpenClaw request failed" {:error (str error) :endpoint ep}))
-
-        (or (nil? status) (not (<= 200 status 299)))
-        (throw (ex-info "OpenClaw returned non-2xx" {:status status :body body :endpoint ep}))
-
+        (throw (ex-info "OpenClaw request failed" {:error (str error)}))
+        (not (<= 200 status 299))
+        (throw (ex-info "OpenClaw non-2xx" {:status status :body body}))
         :else
-        (let [raw (-> (extract-content body) str str/trim)
-              parsed (extract-json-object raw)
-              op? (true? (:opossum parsed))]
-          {:opossum? (boolean op?)   ;; ONLY trust parsed JSON
+        (let [raw    (-> (extract-content body) str str/trim)
+              parsed (extract-json-object raw)]
+          {:opossum? (true? (:opossum parsed))
            :raw raw
            :parsed parsed
            :status status})))))
 
 (defn opossum-in-image?
-  "Returns true/false (JSON-only; no risky heuristics)."
   [image-url content-type]
   (:opossum? (opossum-in-image-debug image-url content-type)))
