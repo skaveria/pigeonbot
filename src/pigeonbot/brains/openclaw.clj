@@ -1,3 +1,7 @@
+;; ---------------------------------------------------------------------------
+;; FILE: src/pigeonbot/brains/openclaw.clj
+;; ---------------------------------------------------------------------------
+
 (ns pigeonbot.brains.openclaw
   (:require [clojure.string :as str]
             [org.httpkit.client :as http]
@@ -30,6 +34,27 @@
         (str resp-body))))
 
 ;; -----------------------------------------------------------------------------
+;; URL normalization (Discord image URLs)
+;; -----------------------------------------------------------------------------
+
+(defn- add-param
+  "Add query param k=v to URL u safely (preserving existing query).
+  Strips trailing ?/& first to avoid '&&' or '?&' situations."
+  [u k v]
+  (let [u (-> (str u) str/trim (str/replace #"[?&]+$" ""))
+        sep (if (str/includes? u "?") "&" "?")]
+    (str u sep k "=" v)))
+
+(defn- normalize-discord-url
+  "Keep signed querystring, strip trailing junk, and force PNG for reliable decode."
+  [u]
+  (let [u (-> (str u) str/trim (str/replace #"[?&]+$" ""))]
+    (if (or (str/includes? u "media.discordapp.net")
+            (str/includes? u "cdn.discordapp.com"))
+      (add-param u "format" "png")
+      u)))
+
+;; -----------------------------------------------------------------------------
 ;; Base64 helpers
 ;; -----------------------------------------------------------------------------
 
@@ -38,20 +63,19 @@
 
 (def ^:private max-image-bytes (* 8 1024 1024)) ;; 8MB cap before base64
 
-(defn- normalize-discord-url
-  "Keep the signed querystring (needed), but remove trailing '&' or '?' which causes '&&' issues."
-  [u]
-  (-> (str u)
-      str/trim
-      (str/replace #"[?&]+$" "")))
-
 (defn- ->data-url
   "Fetch image bytes, base64 them, return a data URL.
-  IMPORTANT: we do NOT append any resize params; we fetch the URL exactly (after trimming trailing &/?)."
+  IMPORTANT:
+  - preserves Discord signed query params
+  - strips trailing &/?
+  - forces format=png on Discord URLs"
   [url content-type]
   (let [fetch-url (normalize-discord-url url)
-        ct        (or (some-> content-type str str/trim not-empty)
-                      "image/png")
+        ;; if we forced format=png, make content-type png too
+        ct (if (str/includes? fetch-url "format=png")
+             "image/png"
+             (or (some-> content-type str str/trim not-empty)
+                 "image/png"))
         {:keys [status body error]}
         @(http/get fetch-url {:as :byte-array :timeout 30000})]
     (cond
@@ -109,11 +133,11 @@
         (extract-content body)))))
 
 ;; -----------------------------------------------------------------------------
-;; Vision: OPOSSUM DETECTOR (JSON-only)
+;; Vision: OPOSSUM DETECTOR (JSON-only, robust extraction)
 ;; -----------------------------------------------------------------------------
 
 (defn- extract-json-object
-  "Extract last {...} JSON object from text."
+  "Extract last {...} JSON object from text (handles code fences / chatter)."
   [^String s]
   (when-let [ms (seq (re-seq #"\{[^{}]*\}" (or s "")))]
     (try
@@ -135,7 +159,11 @@
                  [{:role "user"
                    :content
                    [{:type "text"
-                     :text "Return ONLY JSON: {\"opossum\": true} or {\"opossum\": false}. No commentary."}
+                     :text (str
+                            "You are a strict vision classifier.\n"
+                            "Return ONLY JSON: {\"opossum\": true} or {\"opossum\": false}.\n"
+                            "No markdown, no backticks, no explanation.\n"
+                            "If unsure, use false.")}
                     {:type "image_url"
                      :image_url {:url data-url}}]}]}
         headers {"Authorization" (str "Bearer " token)

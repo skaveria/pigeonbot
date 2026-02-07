@@ -1,3 +1,7 @@
+;; ---------------------------------------------------------------------------
+;; FILE: src/pigeonbot/vision_reacts.clj
+;; ---------------------------------------------------------------------------
+
 (ns pigeonbot.vision-reacts
   (:require [clojure.string :as str]
             [discljord.messaging :as m]
@@ -26,7 +30,6 @@
        (str/starts-with? (str/triml content) "!")))
 
 (defn- image-attachment?
-  "Heuristic: treat as image if content-type starts with image/ OR filename/url has image extension."
   [{:keys [content-type content_type contentType filename url]}]
   (let [ct (or content-type content_type contentType "")
         fn (or filename "")
@@ -36,16 +39,9 @@
         (re-find #"\.(png|jpe?g|gif|webp)$" (str/lower-case u)))))
 
 (defn- strip-trailing-junk
-  "Keep the querystring, but strip trailing &/? that causes '&&'."
+  "Keep querystring (signed URLs matter), but strip trailing &/? which causes '&&'."
   [u]
-  (-> (str u) str/trim (clojure.string/replace #"[?&]+$" "")))
-
-(defn- strip-query
-  "Remove everything after '?' (inclusive)."
-  [u]
-  (let [u (-> (str u) str/trim)
-        i (.indexOf ^String u "?")]
-    (if (neg? i) u (subs u 0 i))))
+  (-> (str u) str/trim (str/replace #"[?&]+$" "")))
 
 (defn- first-image-attachment
   "Return {:url ... :proxy-url ... :content-type ...} for first image attachment, else nil."
@@ -85,7 +81,7 @@
 
 (defn maybe-react-opossum!
   "If msg has an image attachment and OpenClaw says it contains an opossum,
-  react with configured emoji. Returns true if it kicked off processing."
+  react with configured emoji."
   [{:keys [id channel-id content] :as msg}]
   (let [mid (some-> id str)]
     (cond
@@ -97,13 +93,13 @@
 
       :else
       (let [{:keys [url proxy-url content-type]} (first-image-attachment msg)
-            ;; prefer proxy-url but strip ALL querystrings so we never get trailing '&' or signed params
-            clean-url (some-> (or proxy-url url) strip-trailing-junk)]
+            raw-url (or proxy-url url)
+            clean-url (some-> raw-url strip-trailing-junk)]
         (if-not (seq (str clean-url))
           (do (log! "vision-reacts: no image url found; skip") nil)
           (do
             (swap! reacted-message-ids* conj mid)
-            (log! "vision-reacts: image url =" (or proxy-url url) "content-type =" (or content-type ""))
+            (log! "vision-reacts: image url =" raw-url "content-type =" (or content-type ""))
             (log! "vision-reacts: clean url =" clean-url)
             (future
               (try
@@ -118,7 +114,6 @@
                           resp (when (instance? clojure.lang.IDeref ch)
                                  (deref ch 8000 :timeout))]
                       (log! "vision-reacts: reaction response =" (pr-str resp)))))
-
                 (catch Throwable t
                   (swap! reacted-message-ids* disj mid)
                   (log! "vision-reacts: ERROR:" (.getMessage t) (or (ex-data t) {})))))
