@@ -5,11 +5,79 @@
             [pigeonbot.config :as config])
   (:import (java.util Base64)))
 
-;; ... keep your existing cfg/endpoint/extract-content helpers ...
+;; -----------------------------------------------------------------------------
+;; Config + helpers
+;; -----------------------------------------------------------------------------
+
+(defn- cfg []
+  (let [m (config/load-config)]
+    {:url      (or (:openclaw-url m) "http://127.0.0.1:18789")
+     :agent-id (or (:openclaw-agent-id m) "main")
+     ;; prefer config.edn, fallback to env
+     :token    (or (:openclaw-token m) (System/getenv "OPENCLAW_GATEWAY_TOKEN"))
+     :timeout  (long (or (:brain-timeout-ms m) 60000))}))
+
+(defn- endpoint [base path]
+  (str (str/replace (or base "") #"/+$" "") path))
+
+(defn- decode-body [body]
+  (cond
+    (nil? body) {}
+    (map? body) body
+    (string? body) (json/decode body true)
+    :else {}))
+
+(defn- extract-content [resp-body]
+  (let [m (decode-body resp-body)]
+    (or (get-in m [:choices 0 :message :content])
+        (get-in m [:error :message])
+        (str resp-body))))
+
+;; -----------------------------------------------------------------------------
+;; Text/chat
+;; -----------------------------------------------------------------------------
+
+(defn ask-with-context
+  "Call OpenClaw OpenAI-compatible /v1/chat/completions and return assistant content.
+  Context is merged into the user message."
+  [context-text question]
+  (let [{:keys [url agent-id token timeout]} (cfg)
+        _ (when-not (and (string? token) (seq token))
+            (throw (ex-info "Missing OpenClaw gateway token (set :openclaw-token in config.edn or OPENCLAW_GATEWAY_TOKEN)"
+                            {})))
+        ctx (str/trim (or context-text ""))
+        q   (str/trim (str question))
+        user (if (seq ctx)
+               (str "Recent chat:\n" ctx "\n\nNow respond to this message:\n" q)
+               q)
+        ep (endpoint url "/v1/chat/completions")
+        payload {:model "openclaw"
+                 :messages [{:role "user" :content user}]}
+        headers {"Authorization" (str "Bearer " token)
+                 "Content-Type" "application/json"
+                 "x-openclaw-agent-id" (str agent-id)}]
+
+    (let [{:keys [status body error]}
+          @(http/post ep {:headers headers
+                          :body (json/encode payload)
+                          :timeout timeout})]
+      (cond
+        error
+        (throw (ex-info "OpenClaw request failed" {:error (str error) :endpoint ep}))
+
+        (or (nil? status) (not (<= 200 status 299)))
+        (throw (ex-info "OpenClaw returned non-2xx" {:status status :body body :endpoint ep}))
+
+        :else
+        (extract-content body)))))
+
+;; -----------------------------------------------------------------------------
+;; Vision (download -> data URL so the model actually receives pixels)
+;; -----------------------------------------------------------------------------
 
 (def ^:private max-image-bytes (* 6 1024 1024)) ;; 6MB cap; tune if needed
 
-(defn- b64 [^bytes bs]
+(defn- b64 ^String [^bytes bs]
   (.encodeToString (Base64/getEncoder) bs))
 
 (defn- ->data-url
@@ -18,8 +86,7 @@
   [url content-type]
   (let [url (str url)
         ct  (or (some-> content-type str str/trim not-empty) "image/png")
-        ;; discord CDN should be public; no auth headers needed
-        {:keys [status body error headers]} @(http/get url {:as :byte-array :timeout 30000})]
+        {:keys [status body error]} @(http/get url {:as :byte-array :timeout 30000})]
     (cond
       error
       (throw (ex-info "Failed to fetch image bytes" {:url url :error (str error)}))
@@ -39,7 +106,7 @@
 
 (defn opossum-in-image-debug
   "Returns {:opossum? boolean :raw string :parsed map|nil :status int}.
-  Fetches the Discord CDN image and sends it as a base64 data URL so the model actually receives pixels."
+  Fetches the Discord CDN image and sends it as a base64 data URL."
   [image-url content-type]
   (let [{:keys [url agent-id token timeout]} (cfg)
         _ (when-not (and (string? token) (seq token))
