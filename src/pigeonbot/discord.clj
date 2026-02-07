@@ -2,6 +2,7 @@
   (:require [clojure.core.async :as a]
             [clojure.string :as str]
             [discljord.connections :as c]
+            [pigeonbot.vision-reacts :as vision]
             [discljord.events :as e]
             [discljord.messaging :as m]
             [pigeonbot.channels :as channels]
@@ -36,16 +37,12 @@
         (swap! state assoc :bot-user-id (str bid)))
       nil)
 
-    :message-create
-    (do
-      ;; record message for context first
-      (ctx/record-message! event-data)
-
-      ;; command routing
-      (commands/handle-message event-data)
-
-      ;; passive reacts
-      (reacts/maybe-react! event-data))
+:message-create
+(do
+  (ctx/record-message! event-data)
+  (commands/handle-message event-data)
+  (reacts/maybe-react! event-data)
+  (vision/maybe-react-opossum! event-data))
 
     :message-reaction-add
     (rr/handle-reaction-add! event-data)
