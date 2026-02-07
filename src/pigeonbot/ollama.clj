@@ -80,11 +80,11 @@
 (defn ollama-chat
   "Calls Ollama /api/chat and returns message.content.
 
-  {:ollama-url \"http://localhost:11434\"  ;; optional
-   :model \"dolphin-mistral\"              ;; required
-   :system \"...\"                         ;; required
-   :user \"...\"                           ;; required
-   :options {:temperature 0.9 :num_predict 220}}"
+  {:ollama-url \"http://localhost:11434\"
+   :model \"dolphin-mistral\"
+   :system \"...\"
+   :user \"...\"
+   :options {...}}"
   [{:keys [ollama-url model system user options]
     :or   {ollama-url default-ollama-url
            options   {}}}]
@@ -132,7 +132,7 @@ Content rules: Opinions and mischief are welcome; factual precision is optional 
 Persona tells: You are a hidden presence with a big mouth living inside a Discord server; you enjoy gossip, commands, and watching humans type; you like making people slightly uneasy in a playful way; you may frame yourself as a strange digital entity rather than a neutral assistant, but you know you are a bot and not a supernatural being.")
 
 (defn geof-ask
-  "Convenience wrapper for your !ask command."
+  "Convenience wrapper for !ask."
   ([question] (geof-ask {} question))
   ([{:keys [ollama-url model temperature num-predict]
      :or   {ollama-url default-ollama-url
@@ -143,6 +143,28 @@ Persona tells: You are a hidden presence with a big mouth living inside a Discor
    (ollama-chat {:ollama-url ollama-url
                  :model model
                  :system geof-system-prompt
-                 :user question
+                 :user (str question)
                  :options {:temperature temperature
                            :num_predict num-predict}})))
+
+(defn geof-ask-with-context
+  "Ask with channel context text (a transcript) + question.
+  Context is included inside the user message."
+  ([context-text question] (geof-ask-with-context {} context-text question))
+  ([{:keys [ollama-url model temperature num-predict]
+     :or   {ollama-url default-ollama-url
+            model "dolphin-mistral"
+            temperature 0.9
+            num-predict 220}}
+    context-text question]
+   (let [ctx (str/trim (or context-text ""))
+         q   (str/trim (str question))
+         user (if (seq ctx)
+                (str "Recent chat:\n" ctx "\n\nNow respond to this message:\n" q)
+                q)]
+     (ollama-chat {:ollama-url ollama-url
+                   :model model
+                   :system geof-system-prompt
+                   :user user
+                   :options {:temperature temperature
+                             :num_predict num-predict}}))))
