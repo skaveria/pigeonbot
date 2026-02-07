@@ -21,13 +21,27 @@
 
 (def ^:private max-image-bytes (* 2 1024 1024)) ;; 2MB after resize
 
+(defn- discord-proxy-base
+  "Strip any existing query string from a Discord media proxy URL."
+  [u]
+  (let [u (-> (str u) clojure.string/trim)
+        i (.indexOf ^String u "?")]
+    (if (neg? i) u (subs u 0 i))))
+
+(defn- resized-discord-proxy-url
+  "Build a clean Discord proxy URL with our own resize params (no ex/is/hm)."
+  [u]
+  (str (discord-proxy-base u) "?width=512&quality=70&format=webp"))
+
 (defn- ->data-url
   "Fetch an image from a URL and convert it to a data URL.
-  Uses Discord's media proxy resize params to keep payloads small."
+  For Discord media proxy URLs, we DROP the signed querystring and replace it with
+  width/quality params to keep the payload small and avoid '&&' issues."
   [url content-type]
-  (let [url0 (str url)
+  (let [url0 (-> (str url) clojure.string/trim)
         url1 (if (clojure.string/includes? url0 "media.discordapp.net")
-               (add-discord-resize-params url0)
+               (resized-discord-proxy-url url0)
+               ;; For cdn.discordapp.com, keep the URL as-is (it usually works fine)
                url0)
         ct   (or (some-> content-type str clojure.string/trim not-empty)
                  "image/png")
