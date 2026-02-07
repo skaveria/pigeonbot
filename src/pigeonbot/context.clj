@@ -6,7 +6,7 @@
   20)
 
 (defonce ^{:doc "Map: channel-id(string) -> vector of message maps (most-recent last).
-Each entry: {:id :channel-id :author :bot? :content :timestamp}."}
+Each entry: {:id :channel-id :author :author-id :bot? :content :timestamp}."}
   histories*
   (atom {}))
 
@@ -14,15 +14,17 @@ Each entry: {:id :channel-id :author :bot? :content :timestamp}."}
   (str channel-id))
 
 (defn- normalize-author
-  "Extract a stable display name and bot flag from a Discord event payload."
+  "Extract a stable display name, author-id, and bot flag from a Discord event payload."
   [{:keys [author]}]
   (let [a author
         bot? (true? (:bot a))
         name (or (:global_name a)
                  (:username a)
                  (get-in a [:user :username])
-                 "unknown")]
-    {:name name :bot? bot?}))
+                 "unknown")
+        author-id (or (:id a)
+                      (get-in a [:user :id]))]
+    {:name name :bot? bot? :author-id (some-> author-id str)}))
 
 (defn record-message!
   "Store a message-create payload into a per-channel rolling buffer.
@@ -30,10 +32,11 @@ Each entry: {:id :channel-id :author :bot? :content :timestamp}."}
 Stores minimal fields needed for context. Safe to call on every :message-create."
   [{:keys [channel-id id content] :as msg}]
   (when channel-id
-    (let [{:keys [name bot?]} (normalize-author msg)
+    (let [{:keys [name bot? author-id]} (normalize-author msg)
           entry {:id (str id)
                  :channel-id (str channel-id)
                  :author name
+                 :author-id (str (or author-id ""))
                  :bot? bot?
                  :content (str (or content ""))
                  :timestamp (str (or (:timestamp msg) ""))}]
@@ -73,13 +76,8 @@ Optionally exclude a specific message id (e.g. the current message)."
          (remove str/blank?)
          (str/join "\n"))))
 
-;; -----------------------------------------------------------------------------
-;; Extensibility hooks (optional, but handy)
-;; -----------------------------------------------------------------------------
-
 (defn context-text
-  "High-level helper: given a message event payload, return the transcript string.
-This is the function you’ll extend later when you want more context sources."
+  "High-level helper: given a message event payload, return the transcript string."
   [{:keys [channel-id id]}]
   (-> (recent-messages channel-id id)
       format-context))

@@ -26,8 +26,13 @@
         str/trim)
     (str/trim (or s ""))))
 
-(defn- referenced-message-reply-to-bot? [msg]
-  (true? (get-in msg [:referenced_message :author :bot])))
+(defn- referenced-message-reply-to-pigeonbot?
+  "True iff referenced_message exists and the referenced author is THIS bot."
+  [msg]
+  (when-let [bid (bot-id)]
+    (let [ref-author-id (or (get-in msg [:referenced_message :author :id])
+                            (get-in msg [:referenced_message :author :user :id]))]
+      (= (some-> ref-author-id str) bid))))
 
 (defn- message-reference-id [msg]
   (or (get-in msg [:message_reference :message_id])
@@ -35,16 +40,19 @@
       (get-in msg [:message-reference :message_id])
       (get-in msg [:message-reference :message-id])))
 
-(defn- reply-to-bot?
+(defn- reply-to-pigeonbot?
   "Robust reply detection:
-  - If :referenced_message exists and is a bot -> true
-  - Else, if :message_reference points at a message id that we recently recorded as bot -> true"
+  - If :referenced_message exists and its author id == pigeonbot -> true
+  - Else, if :message_reference points at a message id we recently recorded from pigeonbot -> true"
   [{:keys [channel-id] :as msg}]
-  (or (referenced-message-reply-to-bot? msg)
-      (when-let [rid (some-> (message-reference-id msg) str)]
-        (some (fn [{:keys [id bot?]}]
-                (and (= id rid) bot?))
-              (ctx/recent-messages channel-id)))))
+  (or (referenced-message-reply-to-pigeonbot? msg)
+      (when-let [bid (bot-id)]
+        (when-let [rid (some-> (message-reference-id msg) str)]
+          (some (fn [{:keys [id bot? author-id]}]
+                  (and (= id rid)
+                       bot?
+                       (= (some-> author-id str) bid)))
+                (ctx/recent-messages channel-id))))))
 
 (defn- build-ask-context [msg]
   (ctx/context-text msg))
@@ -58,10 +66,8 @@
      (if (str/blank? question)
        (u/send! channel-id :content "Usage: !ask <question> (or reply / @mention me)")
        (let [done? (atom false)]
-         ;; start typing immediately
          (u/typing! channel-id)
 
-         ;; refresh typing while work is in-flight (max ~30s)
          (async/go
            (loop [ticks 0]
              (when (and (not @done?) (< ticks 4))
@@ -70,7 +76,6 @@
                  (u/typing! channel-id))
                (recur (inc ticks)))))
 
-         ;; do the LLM call off-thread
          (future
            (try
              (let [context-text (build-ask-context msg)
@@ -92,14 +97,12 @@
   - Respond ONLY when:
     1) the message is a reply to pigeonbot, OR
     2) pigeonbot is @mentioned directly.
-  - For @mentions, respond as a reply (keeps channels tidy, avoids bot ping-pong)."
+  - For @mentions, respond as a reply (keeps channels tidy)."
   [{:keys [content id] :as msg}]
   (cond
-    ;; replies trigger ask and respond as a reply
-    (reply-to-bot? msg)
+    (reply-to-pigeonbot? msg)
     (do (run-ask! msg content id) true)
 
-    ;; any direct @mention (human or bot) triggers ask; respond as a reply
     (mentioned-pigeonbot? msg)
     (let [q (strip-pigeonbot-mention-anywhere content)]
       (when-not (str/blank? q)
