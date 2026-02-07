@@ -78,7 +78,7 @@
                                     :message-id (str message-id)
                                     :emoji emoji})
     (m/create-reaction! messaging channel-id message-id emoji)))
-
+;; yay
 (defn maybe-react-opossum!
   "If msg has an image attachment and OpenClaw says it contains an opossum,
   react with configured emoji."
