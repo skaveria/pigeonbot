@@ -156,28 +156,48 @@
   [msg]
   (true? (get-in msg [:referenced_message :author :bot])))
 
-(defn- bot-mentioned?
-  "True if pigeonbot is mentioned in this message. We accept either:
-  - a mention object with :bot true
-  - mention id equals (:bot-user-id @state), if present"
+(defn- bot-id
+  "Return pigeonbot's user id as a string, if known."
+  []
+  (some-> (:bot-user-id @state) str))
+
+(defn- mentioned-pigeonbot?
+  "True if this message mentions pigeonbot specifically (by id)."
   [{:keys [mentions]}]
-  (let [bot-id (:bot-user-id @state)]
+  (when-let [bid (bot-id)]
     (boolean
-     (some (fn [m]
-             (or (true? (:bot m))
-                 (and bot-id (= (str (:id m)) (str bot-id)))))
+     (some (fn [m] (= (str (:id m)) bid))
            (or mentions [])))))
 
+(defn- message-starts-with-pigeonbot-mention?
+  "True if content begins with <@id> or <@!id> for pigeonbot."
+  [content]
+  (when-let [bid (bot-id)]
+    (boolean (re-find (re-pattern (str "^\\s*<@!?" (java.util.regex.Pattern/quote bid) ">\\s*"))
+                      (or content "")))))
+
+(defn- strip-leading-pigeonbot-mention
+  "Remove a leading pigeonbot mention token from content."
+  [s]
+  (if-let [bid (bot-id)]
+    (-> (or s "")
+        (str/replace-first (re-pattern (str "^\\s*<@!?" (java.util.regex.Pattern/quote bid) ">\\s*")) "")
+        str/trim)
+    (str/trim (or s ""))))
+
 (defn handle-ask-like!
-  "If msg is a reply to the bot or mentions the bot, treat it like !ask.
+  "If msg is a reply to pigeonbot OR begins with a mention of pigeonbot, treat it like !ask.
   Returns true if handled."
   [{:keys [content] :as msg}]
   (cond
     (reply-to-bot? msg)
     (do (run-ask! msg content) true)
 
-    (bot-mentioned? msg)
-    (let [q (strip-leading-mention content)]
+    ;; Only trigger on a pigeonbot mention (and preferably only when it's the prefix)
+    (or (message-starts-with-pigeonbot-mention? content)
+        (and (mentioned-pigeonbot? msg)
+             (message-starts-with-pigeonbot-mention? content)))
+    (let [q (strip-leading-pigeonbot-mention content)]
       (when-not (str/blank? q)
         (run-ask! msg q)
         true))
