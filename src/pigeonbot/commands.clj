@@ -157,11 +157,6 @@
      (if (str/blank? question)
        (send! channel-id :content "Usage: !ask <your question>  (or reply to me / @mention me)")
        (do
-         ;; quick ack (reply-style if we're replying)
-         (if reply-to-id
-           
-           )
-
          (future
            (try
              (let [context-text (build-ask-context msg)
