@@ -67,30 +67,36 @@
 ;; -----------------------------------------------------------------------------
 
 (defn opossum-in-image?
-  "Ask OpenClaw (vision-capable agent) whether an opossum is present in image-url.
-  Returns true/false. Throws on transport errors.
+  "Returns true/false."
+  [image-url]
+  (:opossum? (opossum-in-image-debug image-url)))
 
-  NOTE: Your OpenClaw agent/model must support vision."
+
+(defn opossum-in-image-debug
+  "Like opossum-in-image?, but returns a debug map:
+  {:opossum? boolean
+   :raw string
+   :parsed map|nil
+   :status int}"
   [image-url]
   (let [{:keys [url agent-id token timeout]} (cfg)
         _ (when-not (and (string? token) (seq token))
             (throw (ex-info "Missing OpenClaw gateway token" {})))
         image-url (str/trim (str image-url))
         _ (when-not (seq image-url)
-            (throw (ex-info "opossum-in-image?: missing image-url" {})))
+            (throw (ex-info "opossum-in-image-debug: missing image-url" {})))
 
         ep (endpoint url "/v1/chat/completions")
 
-        ;; Ask for strict JSON so we don't rely on "YES"/"NO" formatting.
         payload {:model "openclaw"
                  :messages
                  [{:role "user"
                    :content
                    [{:type "text"
                      :text (str
-                            "Look at the image and decide if it contains an opossum (possum). "
-                            "Reply with ONLY valid JSON, no markdown, no extra keys, no commentary.\n"
-                            "Format exactly: {\"opossum\": true} or {\"opossum\": false}\n"
+                            "Look at the image and decide if it contains an opossum (possum).\n"
+                            "Reply with ONLY valid JSON, no markdown, no extra text.\n"
+                            "Exactly: {\"opossum\": true} or {\"opossum\": false}\n"
                             "If unsure, use false.")}
                     {:type "image_url"
                      :image_url {:url image-url}}]}]}
@@ -111,18 +117,16 @@
         (throw (ex-info "OpenClaw returned non-2xx" {:status status :body body :endpoint ep}))
 
         :else
-        (let [txt (-> (extract-content body) str str/trim)]
-          ;; Try strict JSON first.
-          (try
-            (let [m (json/decode txt true)
-                  v (:opossum m)]
-              (boolean v))
-            (catch Throwable _
-              ;; Fallback heuristic if model didn't obey JSON:
-              ;; treat any mention of "opossum"/"possum" as true unless it explicitly negates.
-              (let [u (str/upper-case txt)]
-                (cond
-                  (re-find #"\bNO\b" u) false
-                  (re-find #"\bOPOSSUM\b" u) true
-                  (re-find #"\bPOSSUM\b" u) true
-                  :else false)))))))))
+        (let [raw (-> (extract-content body) str str/trim)
+              parsed (try (json/decode raw true) (catch Throwable _ nil))
+              op? (cond
+                    (boolean? (:opossum parsed)) (:opossum parsed)
+
+                    ;; fallback heuristics for debugging
+                    (re-find #"\bopossum\b" (str/lower-case raw)) true
+                    (re-find #"\bpossum\b" (str/lower-case raw)) true
+                    :else false)]
+          {:opossum? (boolean op?)
+           :raw raw
+           :parsed parsed
+           :status status})))))
