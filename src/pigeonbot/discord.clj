@@ -54,7 +54,6 @@
     (rr/handle-reaction-remove! event-data)
 
     nil))
-
 (defn start-bot
   "Connect to Discord and start the event pump (blocking)."
   []
@@ -71,6 +70,7 @@
 
         event-ch (a/chan 100)
 
+        ;; Reaction intent keyword varies by discljord version.
         reaction-intent (or (when (contains? c/gateway-intents :guild-message-reactions)
                               :guild-message-reactions)
                             (when (contains? c/gateway-intents :guild-message-reaction)
@@ -80,8 +80,19 @@
                             (when (contains? c/gateway-intents :guild-message-reaction-events)
                               :guild-message-reaction-events))
 
+        ;; Message content intent is privileged and ALSO must be enabled in the Discord dev portal.
+        message-content-intent (or (when (contains? c/gateway-intents :message-content)
+                                     :message-content)
+                                   (when (contains? c/gateway-intents :message_content)
+                                     :message_content)
+                                   (when (contains? c/gateway-intents :message-content-intent)
+                                     :message-content-intent)
+                                   (when (contains? c/gateway-intents :message_content_intent)
+                                     :message_content_intent))
+
         intents (cond-> #{:guilds :guild-messages}
-                  reaction-intent (conj reaction-intent))
+                  reaction-intent (conj reaction-intent)
+                  message-content-intent (conj message-content-intent))
 
         conn   (c/connect-bot! token event-ch :intents intents)
         msg-ch (m/start-connection! token)]
@@ -89,6 +100,10 @@
     (println "Gateway intents:" intents)
     (when-not reaction-intent
       (println "WARNING: Could not find a reaction intent keyword in discljord.connections/gateway-intents"))
+    (when-not message-content-intent
+      (println "WARNING: Could not find a message content intent keyword in discljord.connections/gateway-intents"))
+    (when-not (contains? intents (or message-content-intent :message-content))
+      (println "NOTE: If the bot connects but ignores commands, enable Message Content Intent in the Discord Developer Portal (Bot → Privileged Gateway Intents)."))
 
     (reset! state {:connection conn :events event-ch :messaging msg-ch})
     (println "Connected to Discord (online)")
