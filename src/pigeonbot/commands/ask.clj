@@ -18,24 +18,11 @@
   (when-let [bid (bot-id)]
     (boolean (some (fn [m] (= (str (:id m)) bid)) (or mentions [])))))
 
-(defn- message-starts-with-pigeonbot-mention? [content]
-  (when-let [bid (bot-id)]
-    (boolean
-     (re-find (re-pattern (str "^\\s*<@!?" (java.util.regex.Pattern/quote bid) ">\\s*"))
-              (or content "")))))
-
 (defn- strip-pigeonbot-mention-anywhere [s]
   (if-let [bid (bot-id)]
     (-> (or s "")
         (str/replace (re-pattern (str "<@!?" (java.util.regex.Pattern/quote bid) ">")) "")
         (str/replace #"\s+" " ")
-        str/trim)
-    (str/trim (or s ""))))
-
-(defn- strip-leading-pigeonbot-mention [s]
-  (if-let [bid (bot-id)]
-    (-> (or s "")
-        (str/replace-first (re-pattern (str "^\\s*<@!?" (java.util.regex.Pattern/quote bid) ">\\s*")) "")
         str/trim)
     (str/trim (or s ""))))
 
@@ -99,32 +86,27 @@
                (if reply-to-id
                  (u/send-reply! channel-id reply-to-id :content "brain-box error, try again")
                  (u/send! channel-id :content "brain-box error, try again"))))))))))
+
 (defn handle-ask-like!
   "Ask-like behavior rules:
-  - Replies trigger ask and respond as a reply.
-  - Mentions by OTHER BOTS trigger ask even if mention is not at start (so Jimbo works).
-  - Mentions by humans require the mention to be the prefix."
+  - Respond ONLY when:
+    1) the message is a reply to pigeonbot, OR
+    2) pigeonbot is @mentioned directly.
+  - For @mentions, respond as a reply (keeps channels tidy, avoids bot ping-pong)."
   [{:keys [content id] :as msg}]
-  (let [author-bot? (true? (get-in msg [:author :bot]))]
-    (cond
-      (reply-to-bot? msg)
-      (do (run-ask! msg content id) true)
+  (cond
+    ;; replies trigger ask and respond as a reply
+    (reply-to-bot? msg)
+    (do (run-ask! msg content id) true)
 
-      (and author-bot?
-           (mentioned-pigeonbot? msg))
-      (let [q (strip-pigeonbot-mention-anywhere content)]
-        (when-not (str/blank? q)
-          (run-ask! msg q id)
-          true))
+    ;; any direct @mention (human or bot) triggers ask; respond as a reply
+    (mentioned-pigeonbot? msg)
+    (let [q (strip-pigeonbot-mention-anywhere content)]
+      (when-not (str/blank? q)
+        (run-ask! msg q id)
+        true))
 
-      (and (not author-bot?)
-           (message-starts-with-pigeonbot-mention? content))
-      (let [q (strip-leading-pigeonbot-mention content)]
-        (when-not (str/blank? q)
-          (run-ask! msg q nil)
-          true))
-
-      :else nil)))
+    :else nil))
 
 (defcmd "!ask" "Ask pigeonbot a question (also works by replying / @mentioning)."
   [msg]
