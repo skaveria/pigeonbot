@@ -40,9 +40,10 @@
     (log! "vision-reacts: attachments count =" (count atts))
     (when (seq atts)
       (log! "vision-reacts: first attachment keys =" (-> atts first keys sort vec))
-      (log! "vision-reacts: first attachment sample =" (pr-str (select-keys (first atts)
-                                                                            [:id :filename :url :proxy_url :size
-                                                                             :content_type :content-type :contentType]))))
+      (log! "vision-reacts: first attachment sample ="
+            (pr-str (select-keys (first atts)
+                                 [:id :filename :url :proxy-url :proxy_url :size
+                                  :content_type :content-type :contentType]))))
     (some->> atts
              (filter image-attachment?)
              first
@@ -105,15 +106,20 @@
             (log! "vision-reacts: image url =" img)
             (future
               (try
-                (log! "vision-reacts: calling OpenClaw opossum-in-image? ...")
-                (let [yes? (oc/opossum-in-image? img)]
-                  (log! "vision-reacts: OpenClaw result =" yes?)
-                  (when yes?
+                (log! "vision-reacts: calling OpenClaw opossum-in-image-debug ...")
+                (let [{:keys [opossum? raw parsed status] :as dbg}
+                      (oc/opossum-in-image-debug img)]
+                  (log! "vision-reacts: OpenClaw dbg ="
+                        (pr-str (select-keys dbg [:status :opossum? :parsed])))
+                  (log! "vision-reacts: OpenClaw raw =" (pr-str raw))
+
+                  (when opossum?
                     (let [emoji (chosen-emoji)
                           ch (react! channel-id id emoji)
                           resp (when (instance? clojure.lang.IDeref ch)
                                  (deref ch 8000 :timeout))]
                       (log! "vision-reacts: reaction response =" (pr-str resp)))))
+
                 (catch Throwable t
                   ;; allow future retries if OpenClaw was down; remove from processed set
                   (swap! reacted-message-ids* disj mid)
