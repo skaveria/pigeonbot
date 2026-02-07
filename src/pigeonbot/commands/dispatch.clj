@@ -9,6 +9,7 @@
             [pigeonbot.commands.builtins]
             [pigeonbot.commands.roles]
             [pigeonbot.commands.custom]
+            [pigeonbot.commands.vision]
             [pigeonbot.commands.reacts]))
 
 (def command-descriptions reg/command-descriptions)

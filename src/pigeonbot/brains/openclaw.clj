@@ -182,3 +182,42 @@
 (defn opossum-in-image?
   [image-url]
   (:opossum? (opossum-in-image-debug image-url)))
+
+(defn classify-image-url
+  "Ask OpenClaw to look at an image URL and return a vector of label strings.
+  The OpenClaw agent must be able to fetch URLs + do vision.
+
+  Returns {:labels [\"opossum\" ...] :raw \"...\" :parsed {...}}"
+  [image-url]
+  (let [{:keys [url agent-id token timeout]} (cfg)
+        ep (endpoint url "/v1/chat/completions")
+        prompt (str
+                "Look at the image at this URL:\n"
+                "URL: " image-url "\n\n"
+                "Return ONLY valid JSON (no markdown): "
+                "{\"labels\":[\"label1\",\"label2\",\"label3\"]} "
+                "Use short concrete nouns. Lowercase. Max 8 labels.")
+        payload {:model "openclaw"
+                 :messages [{:role "user" :content prompt}]}
+        headers {"Authorization" (str "Bearer " token)
+                 "Content-Type" "application/json"
+                 "x-openclaw-agent-id" agent-id}
+        {:keys [status body error]}
+        @(http/post ep {:headers headers
+                        :body (json/encode payload)
+                        :timeout timeout})]
+    (cond
+      error
+      (throw (ex-info "OpenClaw request failed" {:error (str error) :endpoint ep}))
+
+      (or (nil? status) (not (<= 200 status 299)))
+      (throw (ex-info "OpenClaw returned non-2xx" {:status status :body body :endpoint ep}))
+
+      :else
+      (let [raw (-> (extract-content body) str str/trim)
+            parsed (try (json/decode raw true) (catch Throwable _ nil))
+            labels (->> (or (:labels parsed) [])
+                        (map (comp str/lower-case str/trim str))
+                        (remove str/blank?)
+                        vec)]
+        {:labels labels :raw raw :parsed parsed}))))

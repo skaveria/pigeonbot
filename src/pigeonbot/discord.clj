@@ -12,6 +12,8 @@
             [pigeonbot.custom-commands :as custom]
             [pigeonbot.discljord-patch :as djpatch]
             [pigeonbot.message-reacts :as reacts]
+            [pigeonbot.vision-registry :as vision-reg]
+[pigeonbot.vision-reacts :as vision-reacts]
             [pigeonbot.reaction-roles :as rr]
             [pigeonbot.state :refer [state]]))
 
@@ -40,8 +42,15 @@
 :message-create
 (do
   (ctx/record-message! event-data)
+
+  ;; command routing
   (commands/handle-message event-data)
+
+  ;; passive reacts
   (reacts/maybe-react! event-data)
+
+  ;; vision rules (image -> labels -> actions)
+  (vision-reacts/maybe-react-vision! event-data)
   (vision/maybe-react-opossum! event-data))
 
     :message-reaction-add
@@ -57,6 +66,7 @@
   (channels/load-channels!)
   (custom/load!)
   (reacts/load!)
+  (vision-reg/load!)
   (djpatch/patch-discljord!)
 
   (let [cfg (config/load-config)
