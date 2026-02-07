@@ -69,9 +69,6 @@
        (u/send! channel-id :content "Usage: !ask <question> (or reply / @mention me)")
        (do
          ;; quick ack
-         (if reply-to-id
-           (u/send-reply! channel-id reply-to-id :content "Hm. Lemme think…")
-           (u/send! channel-id :content "Hm. Lemme think…"))
 
          (future
            (try
