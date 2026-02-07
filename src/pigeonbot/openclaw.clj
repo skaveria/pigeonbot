@@ -5,14 +5,19 @@
             [pigeonbot.config :as config]))
 
 (defn- add-discord-resize-params
-  "Discord media proxy supports width/quality; add them safely.
-  Handles URLs that already have ?query, and URLs that end with trailing ? or &."
+  "Safely append resize params to Discord media proxy URLs.
+  - trims whitespace
+  - strips trailing ? and/or &
+  - collapses any accidental && into &
+  - appends width/quality with correct separator"
   [u]
-  (let [u0 (str u)
-        ;; strip any trailing ? or & so we never create '&&' or '?&'
+  (let [u0 (-> (str u) str/trim)
+        ;; strip trailing ?/& (even if multiple)
         u1 (str/replace u0 #"[?&]+$" "")
-        sep (if (str/includes? u1 "?") "&" "?")]
-    (str u1 sep "width=512&quality=70")))
+        ;; collapse any repeated ampersands anywhere
+        u2 (str/replace u1 #"&{2,}" "&")
+        sep (if (str/includes? u2 "?") "&" "?")]
+    (str u2 sep "width=512&quality=70")))
 
 (def ^:private max-image-bytes (* 2 1024 1024)) ;; 2MB after resize
 
