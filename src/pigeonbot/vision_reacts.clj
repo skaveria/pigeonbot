@@ -36,7 +36,7 @@
         (re-find #"\.(png|jpe?g|gif|webp)$" (str/lower-case u)))))
 
 (defn- first-image-attachment
-  "Return {:url ... :content-type ...} for first image attachment, else nil."
+  "Return {:url ... :proxy-url ... :content-type ...} for first image attachment, else nil."
   [msg]
   (let [atts (or (:attachments msg) [])]
     (log! "vision-reacts: attachments count =" (count atts))
@@ -48,6 +48,7 @@
                                   :content_type :content-type :contentType]))))
     (when-let [att (->> atts (filter image-attachment?) first)]
       {:url (:url att)
+       :proxy-url (or (:proxy-url att) (:proxy_url att))
        :content-type (or (:content-type att) (:content_type att) (:contentType att))})))
 
 (defn- normalize-emoji
