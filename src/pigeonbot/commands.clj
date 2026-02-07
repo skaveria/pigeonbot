@@ -229,7 +229,7 @@
           (send! channel-id :content (if existed?
                                        (str "🗑️ Deleted `" cmd "`.")
                                        (str "No such custom command `" cmd "`."))))))))
-
+;working 
 (defcmd "!renamecommand" "Rename custom command: !renamecommand <old> <new>"
   [{:keys [channel-id content] :as msg}]
   (if-not (custom/allowed-to-register? msg)
