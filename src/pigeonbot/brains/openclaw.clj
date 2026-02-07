@@ -80,26 +80,38 @@
 (defn- b64 ^String [^bytes bs]
   (.encodeToString (Base64/getEncoder) bs))
 
+(def ^:private max-image-bytes (* 2 1024 1024)) ;; 2MB cap AFTER resize
+
+(defn- add-discord-resize-params
+  "Discord media proxy supports width/quality; add if missing."
+  [u]
+  (let [u (str u)
+        sep (if (str/includes? u "?") "&" "?")]
+    (str u sep "width=512&quality=70")))
+
 (defn- ->data-url
   "Fetch an image from a URL and convert to data URL.
-  Uses provided content-type when available; otherwise defaults to image/png."
+  If the URL is a Discord media proxy URL, request a resized version to keep payload small."
   [url content-type]
-  (let [url (str url)
+  (let [url0 (str url)
+        url1 (if (str/includes? url0 "media.discordapp.net")
+               (add-discord-resize-params url0)
+               url0)
         ct  (or (some-> content-type str str/trim not-empty) "image/png")
-        {:keys [status body error]} @(http/get url {:as :byte-array :timeout 30000})]
+        {:keys [status body error]} @(http/get url1 {:as :byte-array :timeout 30000})]
     (cond
       error
-      (throw (ex-info "Failed to fetch image bytes" {:url url :error (str error)}))
+      (throw (ex-info "Failed to fetch image bytes" {:url url1 :error (str error)}))
 
       (or (nil? status) (not (<= 200 status 299)))
-      (throw (ex-info "Image fetch returned non-2xx" {:url url :status status}))
+      (throw (ex-info "Image fetch returned non-2xx" {:url url1 :status status}))
 
       (nil? body)
-      (throw (ex-info "Image fetch returned empty body" {:url url :status status}))
+      (throw (ex-info "Image fetch returned empty body" {:url url1 :status status}))
 
       (> (alength ^bytes body) max-image-bytes)
-      (throw (ex-info "Image too large to inline as data URL"
-                      {:url url :bytes (alength ^bytes body) :max max-image-bytes}))
+      (throw (ex-info "Image too large even after resize"
+                      {:url url1 :bytes (alength ^bytes body) :max max-image-bytes}))
 
       :else
       (str "data:" ct ";base64," (b64 ^bytes body)))))
