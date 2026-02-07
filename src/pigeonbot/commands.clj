@@ -24,6 +24,21 @@
     (.deleteOnExit tmp)
     tmp))
 
+(defn send-reply!
+  "Send a Discord reply to a specific message-id in the same channel.
+  Does not ping the replied user by default."
+  [channel-id reply-to-message-id & {:keys [content file]}]
+  (if-let [messaging (:messaging @state)]
+    (m/create-message! messaging
+                       channel-id
+                       :content (or content "")
+                       :file file
+                       :message_reference {:message_id (str reply-to-message-id)}
+                       :allowed_mentions {:replied_user false})
+    (do
+      (println "send-reply!: messaging connection is nil (bot not ready?)")
+      nil)))
+
 (defn send!
   "Safely send a Discord message. Returns a response channel or nil."
   [channel-id & {:keys [content file allowed-mentions]
@@ -133,22 +148,33 @@
       ctx/format-context))
 
 (defn- run-ask!
-  "Single entrypoint for all 'ask-like' behaviors."
-  [{:keys [channel-id] :as msg} question]
-  (let [question (str/trim (or question ""))]
-    (if (str/blank? question)
-      (send! channel-id :content "Usage: !ask <your question>  (or reply to me / @mention me)")
-      (do
-        (send! channel-id :content "Hm. Lemme think…")
-        (future
-          (try
-            (let [context-text (build-ask-context msg)
-                  reply (ollama/geof-ask-with-context context-text question)
-                  reply (clamp-discord reply)]
-              (send! channel-id :content reply))
-            (catch Throwable t
-              (println "ask error:" (.getMessage t))
-              (send! channel-id :content "Listen here—something went sideways talking to my brain-box."))))))))
+  "Single entrypoint for all 'ask-like' behaviors.
+  If reply-to-id is provided, respond using Discord reply feature."
+  ([msg question]
+   (run-ask! msg question nil))
+  ([{:keys [channel-id] :as msg} question reply-to-id]
+   (let [question (str/trim (or question ""))]
+     (if (str/blank? question)
+       (send! channel-id :content "Usage: !ask <your question>  (or reply to me / @mention me)")
+       (do
+         ;; quick ack (reply-style if we're replying)
+         (if reply-to-id
+           (send-reply! channel-id reply-to-id :content "Hm. Lemme think…")
+           (send! channel-id :content "Hm. Lemme think…"))
+
+         (future
+           (try
+             (let [context-text (build-ask-context msg)
+                   reply (ollama/geof-ask-with-context context-text question)
+                   reply (clamp-discord reply)]
+               (if reply-to-id
+                 (send-reply! channel-id reply-to-id :content reply)
+                 (send! channel-id :content reply)))
+             (catch Throwable t
+               (println "ask error:" (.getMessage t))
+               (if reply-to-id
+                 (send-reply! channel-id reply-to-id :content "Listen here—something went sideways talking to my brain-box.")
+                 (send! channel-id :content "Listen here—something went sideways talking to my brain-box."))))))))))
 
 (defn- reply-to-bot?
   "Discord replies include :referenced_message; if that referenced author is a bot,
@@ -186,20 +212,21 @@
     (str/trim (or s ""))))
 
 (defn handle-ask-like!
-  "If msg is a reply to pigeonbot OR begins with a mention of pigeonbot, treat it like !ask.
-  Returns true if handled."
-  [{:keys [content] :as msg}]
+  "If msg is a reply to the bot or mentions the bot, treat it like !ask.
+  If the author is a bot, reply using Discord's reply feature."
+  [{:keys [content id] :as msg}]
   (cond
     (reply-to-bot? msg)
-    (do (run-ask! msg content) true)
+    (do (run-ask! msg content id) true) ;; replying back keeps threads tidy
 
-    ;; Only trigger on a pigeonbot mention (and preferably only when it's the prefix)
     (or (message-starts-with-pigeonbot-mention? content)
         (and (mentioned-pigeonbot? msg)
              (message-starts-with-pigeonbot-mention? content)))
-    (let [q (strip-leading-pigeonbot-mention content)]
+    (let [q (strip-leading-pigeonbot-mention content)
+          author-bot? (true? (get-in msg [:author :bot]))
+          reply-to-id (when author-bot? id)]
       (when-not (str/blank? q)
-        (run-ask! msg q)
+        (run-ask! msg q reply-to-id)
         true))
 
     :else
