@@ -3,22 +3,46 @@
             [pigeonbot.context :as ctx]
             [pigeonbot.ollama :as ollama]
             [pigeonbot.state :refer [state]]
-            [pigeonbot.commands.registry :as reg :refer [defcmd]]
+            [pigeonbot.commands.registry :refer [defcmd]]
             [pigeonbot.commands.util :as u]))
 
 (defn- strip-command-text [content]
-  (-> (or content "") (str/replace-first #"^\s*\S+\s*" "") str/trim))
+  (-> (or content "")
+      (str/replace-first #"^\s*\S+\s*" "")
+      str/trim))
 
 (defn- bot-id []
   (some-> (:bot-user-id @state) str))
 
-(defn- message-starts-with-pigeonbot-mention? [content]
+(defn- mentioned-pigeonbot?
+  "True if this message mentions pigeonbot specifically (by id)."
+  [{:keys [mentions]}]
+  (when-let [bid (bot-id)]
+    (boolean
+     (some (fn [m] (= (str (:id m)) bid))
+           (or mentions [])))))
+
+(defn- message-starts-with-pigeonbot-mention?
+  "True if content begins with <@id> or <@!id> for pigeonbot."
+  [content]
   (when-let [bid (bot-id)]
     (boolean
      (re-find (re-pattern (str "^\\s*<@!?" (java.util.regex.Pattern/quote bid) ">\\s*"))
               (or content "")))))
 
-(defn- strip-leading-pigeonbot-mention [s]
+(defn- strip-pigeonbot-mention-anywhere
+  "Remove ALL pigeonbot mention tokens from content (useful for bot-authored messages)."
+  [s]
+  (if-let [bid (bot-id)]
+    (-> (or s "")
+        (str/replace (re-pattern (str "<@!?" (java.util.regex.Pattern/quote bid) ">")) "")
+        (str/replace #"\s+" " ")
+        str/trim)
+    (str/trim (or s ""))))
+
+(defn- strip-leading-pigeonbot-mention
+  "Remove a leading pigeonbot mention token from content."
+  [s]
   (if-let [bid (bot-id)]
     (-> (or s "")
         (str/replace-first (re-pattern (str "^\\s*<@!?" (java.util.regex.Pattern/quote bid) ">\\s*")) "")
@@ -49,14 +73,6 @@
                 (and (= id rid) bot?))
               (ctx/recent-messages channel-id)))))
 
-(defn- mentioned-pigeonbot?
-  "True if this message mentions pigeonbot specifically (by id)."
-  [{:keys [mentions]}]
-  (when-let [bid (bot-id)]
-    (boolean
-     (some (fn [m] (= (str (:id m)) bid))
-           (or mentions [])))))
-
 (defn- build-ask-context [msg]
   (ctx/context-text msg))
 
@@ -68,7 +84,9 @@
      (if (str/blank? question)
        (u/send! channel-id :content "Usage: !ask <question> (or reply / @mention me)")
        (do
-         ;; quick ack
+         (if reply-to-id
+           (u/send-reply! channel-id reply-to-id :content "Hm. Lemme think…")
+           (u/send! channel-id :content "Hm. Lemme think…"))
 
          (future
            (try
@@ -85,25 +103,34 @@
                  (u/send! channel-id :content "brain-box error, try again"))))))))))
 
 (defn handle-ask-like!
-  "If reply to pigeonbot OR message begins with pigeonbot mention, run ask pipeline."
+  "Ask-like behavior rules:
+  - Replies to pigeonbot/bot messages trigger ask and respond as a reply.
+  - Mentions by OTHER BOTS trigger ask even if mention is not at start (so Jimbo works).
+  - Mentions by humans require the mention to be the prefix (prevents hijacking)."
   [{:keys [content id] :as msg}]
-  (cond
-    ;; replies: always reply back (keeps threads tidy)
-    (reply-to-bot? msg)
-    (do (run-ask! msg content id) true)
+  (let [author-bot? (true? (get-in msg [:author :bot]))]
+    (cond
+      ;; Replies: keep threads tidy by replying
+      (reply-to-bot? msg)
+      (do (run-ask! msg content id) true)
 
-    ;; mention: only if pigeonbot is the prefix
-    (and (or (message-starts-with-pigeonbot-mention? content)
-             (mentioned-pigeonbot? msg))
-         (message-starts-with-pigeonbot-mention? content))
-    (let [q (strip-leading-pigeonbot-mention content)
-          author-bot? (true? (get-in msg [:author :bot]))
-          reply-to-id (when author-bot? id)]
-      (when-not (str/blank? q)
-        (run-ask! msg q reply-to-id)
-        true))
+      ;; Bot-authored mention: trigger if pigeonbot is mentioned anywhere
+      (and author-bot?
+           (mentioned-pigeonbot? msg))
+      (let [q (strip-pigeonbot-mention-anywhere content)]
+        (when-not (str/blank? q)
+          (run-ask! msg q id) ;; reply to the bot message
+          true))
 
-    :else nil))
+      ;; Human mention: only if it begins with the mention
+      (and (not author-bot?)
+           (message-starts-with-pigeonbot-mention? content))
+      (let [q (strip-leading-pigeonbot-mention content)]
+        (when-not (str/blank? q)
+          (run-ask! msg q nil)
+          true))
+
+      :else nil)))
 
 (defcmd "!ask" "Ask pigeonbot a question (also works by replying / @mentioning)."
   [msg]
