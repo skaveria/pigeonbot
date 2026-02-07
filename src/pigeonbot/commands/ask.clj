@@ -1,5 +1,6 @@
 (ns pigeonbot.commands.ask
-  (:require [clojure.string :as str]
+  (:require [clojure.core.async :as async]
+            [clojure.string :as str]
             [pigeonbot.context :as ctx]
             [pigeonbot.ollama :as ollama]
             [pigeonbot.state :refer [state]]
@@ -7,32 +8,23 @@
             [pigeonbot.commands.util :as u]))
 
 (defn- strip-command-text [content]
-  (-> (or content "")
-      (str/replace-first #"^\s*\S+\s*" "")
-      str/trim))
+  (-> (or content "") (str/replace-first #"^\s*\S+\s*" "") str/trim))
 
 (defn- bot-id []
   (some-> (:bot-user-id @state) str))
 
 (defn- mentioned-pigeonbot?
-  "True if this message mentions pigeonbot specifically (by id)."
   [{:keys [mentions]}]
   (when-let [bid (bot-id)]
-    (boolean
-     (some (fn [m] (= (str (:id m)) bid))
-           (or mentions [])))))
+    (boolean (some (fn [m] (= (str (:id m)) bid)) (or mentions [])))))
 
-(defn- message-starts-with-pigeonbot-mention?
-  "True if content begins with <@id> or <@!id> for pigeonbot."
-  [content]
+(defn- message-starts-with-pigeonbot-mention? [content]
   (when-let [bid (bot-id)]
     (boolean
      (re-find (re-pattern (str "^\\s*<@!?" (java.util.regex.Pattern/quote bid) ">\\s*"))
               (or content "")))))
 
-(defn- strip-pigeonbot-mention-anywhere
-  "Remove ALL pigeonbot mention tokens from content (useful for bot-authored messages)."
-  [s]
+(defn- strip-pigeonbot-mention-anywhere [s]
   (if-let [bid (bot-id)]
     (-> (or s "")
         (str/replace (re-pattern (str "<@!?" (java.util.regex.Pattern/quote bid) ">")) "")
@@ -40,23 +32,17 @@
         str/trim)
     (str/trim (or s ""))))
 
-(defn- strip-leading-pigeonbot-mention
-  "Remove a leading pigeonbot mention token from content."
-  [s]
+(defn- strip-leading-pigeonbot-mention [s]
   (if-let [bid (bot-id)]
     (-> (or s "")
         (str/replace-first (re-pattern (str "^\\s*<@!?" (java.util.regex.Pattern/quote bid) ">\\s*")) "")
         str/trim)
     (str/trim (or s ""))))
 
-(defn- referenced-message-reply-to-bot?
-  "Some payloads include full :referenced_message."
-  [msg]
+(defn- referenced-message-reply-to-bot? [msg]
   (true? (get-in msg [:referenced_message :author :bot])))
 
-(defn- message-reference-id
-  "Some payloads only include :message_reference {:message_id ...} without :referenced_message."
-  [msg]
+(defn- message-reference-id [msg]
   (or (get-in msg [:message_reference :message_id])
       (get-in msg [:message_reference :message-id])
       (get-in msg [:message-reference :message_id])
@@ -77,26 +63,38 @@
   (ctx/context-text msg))
 
 (defn run-ask!
-  "Core ask runner. If reply-to-id provided, sends as a reply."
+  "Core ask runner. If reply-to-id provided, sends as a reply.
+  Uses typing indicator instead of \"Hm. Lemme think…\"."
   ([msg question] (run-ask! msg question nil))
   ([{:keys [channel-id] :as msg} question reply-to-id]
    (let [question (str/trim (or question ""))]
      (if (str/blank? question)
        (u/send! channel-id :content "Usage: !ask <question> (or reply / @mention me)")
-       (do
-         (if reply-to-id
-           (u/send-reply! channel-id reply-to-id :content "Hm. Lemme think…")
-           (u/send! channel-id :content "Hm. Lemme think…"))
+       (let [done? (atom false)]
+         ;; start typing immediately
+         (u/typing! channel-id)
 
+         ;; refresh typing while work is in-flight (max ~30s)
+         (async/go
+           (loop [ticks 0]
+             (when (and (not @done?) (< ticks 4))
+               (async/<! (async/timeout 8000))
+               (when-not @done?
+                 (u/typing! channel-id))
+               (recur (inc ticks)))))
+
+         ;; do the LLM call off-thread
          (future
            (try
              (let [context-text (build-ask-context msg)
                    reply (ollama/geof-ask-with-context context-text question)
                    reply (u/clamp-discord reply)]
+               (reset! done? true)
                (if reply-to-id
                  (u/send-reply! channel-id reply-to-id :content reply)
                  (u/send! channel-id :content reply)))
              (catch Throwable t
+               (reset! done? true)
                (println "ask error:" (.getMessage t))
                (if reply-to-id
                  (u/send-reply! channel-id reply-to-id :content "brain-box error, try again")
@@ -104,25 +102,22 @@
 
 (defn handle-ask-like!
   "Ask-like behavior rules:
-  - Replies to pigeonbot/bot messages trigger ask and respond as a reply.
+  - Replies trigger ask and respond as a reply.
   - Mentions by OTHER BOTS trigger ask even if mention is not at start (so Jimbo works).
-  - Mentions by humans require the mention to be the prefix (prevents hijacking)."
+  - Mentions by humans require the mention to be the prefix."
   [{:keys [content id] :as msg}]
   (let [author-bot? (true? (get-in msg [:author :bot]))]
     (cond
-      ;; Replies: keep threads tidy by replying
       (reply-to-bot? msg)
       (do (run-ask! msg content id) true)
 
-      ;; Bot-authored mention: trigger if pigeonbot is mentioned anywhere
       (and author-bot?
            (mentioned-pigeonbot? msg))
       (let [q (strip-pigeonbot-mention-anywhere content)]
         (when-not (str/blank? q)
-          (run-ask! msg q id) ;; reply to the bot message
+          (run-ask! msg q id)
           true))
 
-      ;; Human mention: only if it begins with the mention
       (and (not author-bot?)
            (message-starts-with-pigeonbot-mention? content))
       (let [q (strip-leading-pigeonbot-mention content)]

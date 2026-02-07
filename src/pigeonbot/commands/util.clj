@@ -50,6 +50,19 @@
       (println "send-reply!: messaging is nil (bot not ready?)")
       nil)))
 
+(defn typing!
+  "Trigger a ~10s typing indicator for the channel."
+  [channel-id]
+  (if-let [messaging (:messaging @state)]
+    (try
+      (m/trigger-typing-indicator! messaging channel-id)
+      (catch Throwable t
+        (println "typing!: failed:" (.getMessage t))
+        nil))
+    (do
+      (println "typing!: messaging is nil (bot not ready?)")
+      nil)))
+
 (defn send-file!
   "Built-in local media only (custom commands should use CDN URLs).
   Uses a temp-copy + timeout so weird files don't hang forever."
