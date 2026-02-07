@@ -91,17 +91,18 @@
       (contains? @reacted-message-ids* mid) (do (log! "vision-reacts: skip (already processed)" mid) nil)
 
       :else
-      (let [{:keys [url content-type] :as att} (first-image-attachment msg)]
-        (if-not (seq (str url))
+      (let [{:keys [url proxy-url content-type]} (first-image-attachment msg)
+            fetch-url (or proxy-url url)]
+        (if-not (seq (str fetch-url))
           (do (log! "vision-reacts: no image url found; skip") nil)
           (do
             (swap! reacted-message-ids* conj mid)
-            (log! "vision-reacts: image url =" url "content-type =" (or content-type ""))
+            (log! "vision-reacts: image url =" fetch-url "content-type =" (or content-type ""))
             (future
               (try
                 (log! "vision-reacts: calling OpenClaw opossum-in-image-debug ...")
                 (let [{:keys [opossum? raw parsed status] :as dbg}
-      (oc/opossum-in-image-debug (or proxy-url url) content-type)]
+                      (oc/opossum-in-image-debug fetch-url content-type)]
                   (log! "vision-reacts: OpenClaw dbg =" (pr-str (select-keys dbg [:status :opossum? :parsed])))
                   (log! "vision-reacts: OpenClaw raw =" (pr-str raw))
                   (when opossum?
