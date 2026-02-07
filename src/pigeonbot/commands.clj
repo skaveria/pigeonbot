@@ -160,7 +160,7 @@
          ;; quick ack (reply-style if we're replying)
          (if reply-to-id
            (send-reply! channel-id reply-to-id :content "Hm. Lemme think…")
-           (send! channel-id :content "Hm. Lemme think…"))
+           )
 
          (future
            (try
