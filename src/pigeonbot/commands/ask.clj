@@ -2,7 +2,7 @@
   (:require [clojure.core.async :as async]
             [clojure.string :as str]
             [pigeonbot.context :as ctx]
-            [pigeonbot.ollama :as ollama]
+            [pigeonbot.brain :as brain]
             [pigeonbot.state :refer [state]]
             [pigeonbot.commands.registry :refer [defcmd]]
             [pigeonbot.commands.util :as u]))
@@ -87,7 +87,7 @@
          (future
            (try
              (let [context-text (build-ask-context msg)
-                   reply (ollama/geof-ask-with-context context-text question)
+                   reply (brain/ask-with-context context-text question)
                    reply (u/clamp-discord reply)]
                (reset! done? true)
                (if reply-to-id
@@ -99,7 +99,6 @@
                (if reply-to-id
                  (u/send-reply! channel-id reply-to-id :content "brain-box error, try again")
                  (u/send! channel-id :content "brain-box error, try again"))))))))))
-
 (defn handle-ask-like!
   "Ask-like behavior rules:
   - Replies trigger ask and respond as a reply.
