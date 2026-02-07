@@ -1,25 +1,18 @@
 (ns pigeonbot.custom-commands
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str]
             [pigeonbot.config :as config]))
-
-;; -----------------------------------------------------------------------------
-;; Storage
-;; -----------------------------------------------------------------------------
 
 (def ^:private registry-path
   "EDN file in repo root storing custom commands."
   "custom_commands.edn")
 
 (defonce ^{:doc "Map: \"!moo\" -> {:type :url :url \"https://cdn...\" :filename \"cow.png\" :added-by ... :added-at ...}
-                 Back-compat: older entries may have {:file \"custom/moo.png\"}."}
+Back-compat: older entries may have {:file \"custom/moo.png\"}."}
   registry*
   (atom {}))
 
-(defn load!
-  "Load registry from disk (if present). Safe to call multiple times."
-  []
+(defn load! []
   (let [f (io/file registry-path)]
     (reset! registry*
             (if (.exists f)
@@ -31,19 +24,13 @@
               {})))
   @registry*)
 
-(defn save!
-  "Persist registry to disk."
-  []
+(defn save! []
   (spit registry-path (pr-str @registry*))
   @registry*)
 
 ;; -----------------------------------------------------------------------------
 ;; Validation / naming
 ;; -----------------------------------------------------------------------------
-
-(def ^:private max-bytes
-  "Refuse very large attachments."
-  (* 8 1024 1024)) ;; 8 MiB
 
 (defn valid-name?
   "Allow simple command names like moo, party-cat, etc."
@@ -54,6 +41,10 @@
   "Turn \"moo\" into \"!moo\"."
   [name]
   (str "!" name))
+
+;; -----------------------------------------------------------------------------
+;; Permissions
+;; -----------------------------------------------------------------------------
 
 (defn allowed-to-register?
   "Default: allow everyone.
@@ -69,13 +60,11 @@
 ;; Register (CDN URL-based)
 ;; -----------------------------------------------------------------------------
 
+(def ^:private max-bytes (* 8 1024 1024))
+
 (defn register-from-attachment!
   "Register a custom command from a Discord attachment map.
-  Stores the Discord CDN URL (no download, no re-upload).
-
-  Returns:
-    {:ok? true :cmd \"!moo\" :url \"https://cdn...\"}
-  or {:ok? false :message \"...\"}"
+  Stores Discord CDN URL (no download, no re-upload)."
   [cmd attachment author-id]
   (let [{:keys [url filename size]} attachment
         size (or size 0)]
@@ -98,28 +87,57 @@
         {:ok? true :cmd cmd :url url}))))
 
 ;; -----------------------------------------------------------------------------
-;; Lookup
+;; Lookup / list
 ;; -----------------------------------------------------------------------------
 
-(defn lookup
-  "Return the registry entry map for cmd, or nil."
-  [cmd]
+(defn lookup [cmd]
   (get @registry* cmd))
 
 (defn registered-reply
-  "Return a normalized reply map for cmd, or nil.
-  Normal form:
-    {:type :url :url \"...\"}
-  Back-compat:
-    {:type :file :file \"custom/moo.png\"}"
+  "Return normalized reply map for cmd, or nil.
+  Normal: {:type :url :url \"...\"}
+  Back-compat: {:type :file :file \"custom/moo.png\"}"
   [cmd]
   (when-let [entry (lookup cmd)]
     (cond
       (= (:type entry) :url)
       {:type :url :url (:url entry) :filename (:filename entry)}
 
-      ;; Back-compat with old format that stored :file
       (:file entry)
       {:type :file :file (:file entry)}
 
       :else nil)))
+
+(defn list-commands
+  "Return sorted vector of custom command strings (\"!moo\" ...)."
+  []
+  (->> (keys @registry*) sort vec))
+
+;; -----------------------------------------------------------------------------
+;; Mutations (delete/rename)
+;; -----------------------------------------------------------------------------
+
+(defn delete!
+  "Delete a custom command. Returns true if existed."
+  [cmd]
+  (let [existed? (contains? @registry* cmd)]
+    (swap! registry* dissoc cmd)
+    (save!)
+    existed?))
+
+(defn rename!
+  "Rename a custom command key, keeping the same entry. Returns:
+   {:ok? true} or {:ok? false :message \"...\"}"
+  [old-cmd new-cmd]
+  (cond
+    (not (contains? @registry* old-cmd))
+    {:ok? false :message (str "No such custom command `" old-cmd "`.")}
+
+    (contains? @registry* new-cmd)
+    {:ok? false :message (str "A custom command `" new-cmd "` already exists.")}
+
+    :else
+    (let [entry (get @registry* old-cmd)]
+      (swap! registry* (fn [m] (-> m (dissoc old-cmd) (assoc new-cmd entry))))
+      (save!)
+      {:ok? true})))

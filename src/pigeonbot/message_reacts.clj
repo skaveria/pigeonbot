@@ -11,15 +11,13 @@
   "react_rules.edn")
 
 (defonce ^{:doc "Vector of rules:
-  {:trigger \"sandwich\" :reply {:type :text :text \"...\"}}
-  {:trigger \"sandwich\" :reply {:type :url :url \"https://cdn...\"}}
-  Back-compat: {:type :file :file \"react/x.png\"} from older versions."}
+{:trigger \"sandwich\" :reply {:type :text :text \"...\"}}
+{:trigger \"sandwich\" :reply {:type :url :url \"https://cdn...\"}}
+Back-compat: {:type :file :file \"react/x.png\"}."}
   rules*
   (atom []))
 
-(defn load!
-  "Load rules from disk (if present). Safe to call multiple times."
-  []
+(defn load! []
   (let [f (io/file rules-path)]
     (reset! rules*
             (if (.exists f)
@@ -31,14 +29,12 @@
               [])))
   @rules*)
 
-(defn save!
-  "Persist rules to disk."
-  []
+(defn save! []
   (spit rules-path (pr-str @rules*))
   @rules*)
 
 ;; -----------------------------------------------------------------------------
-;; Permissions (optional)
+;; Permissions
 ;; -----------------------------------------------------------------------------
 
 (defn allowed-to-register?
@@ -52,12 +48,8 @@
         (contains? admins (str uid)))))
 
 ;; -----------------------------------------------------------------------------
-;; Helpers
+;; Send helpers
 ;; -----------------------------------------------------------------------------
-
-(def ^:private max-bytes
-  "Refuse very large attachments."
-  (* 8 1024 1024)) ;; 8 MiB
 
 (defn- send-text!
   [channel-id text]
@@ -65,7 +57,7 @@
     (m/create-message! messaging channel-id :content (or text ""))))
 
 (defn- send-file!
-  "Back-compat only: send a local file if you still have file-based rules."
+  "Back-compat only."
   [channel-id ^java.io.File f]
   (when-let [messaging (:messaging @state)]
     (m/create-message! messaging channel-id :content "" :file f)))
@@ -85,11 +77,12 @@
          (not= -1 (.indexOf ^String h ^String n)))))
 
 ;; -----------------------------------------------------------------------------
-;; Rule registration
+;; Registration
 ;; -----------------------------------------------------------------------------
 
+(def ^:private max-bytes (* 8 1024 1024))
+
 (defn register-text!
-  "Add a text reaction rule."
   [trigger text author-id]
   (swap! rules* conj
          {:trigger  (str trigger)
@@ -100,8 +93,7 @@
   {:ok? true})
 
 (defn register-attachment!
-  "Add an attachment reaction rule from a Discord attachment map.
-  Stores the Discord CDN URL (no download, no re-upload)."
+  "Stores CDN URL (no download, no re-upload)."
   [trigger attachment author-id]
   (let [{:keys [url filename size]} attachment
         size (or size 0)]
@@ -123,13 +115,10 @@
         {:ok? true :url url}))))
 
 ;; -----------------------------------------------------------------------------
-;; Matching + reacting
+;; Matching
 ;; -----------------------------------------------------------------------------
 
 (defn maybe-react!
-  "If msg content contains a registered trigger, send its reply.
-  Ignores bot messages and command messages.
-  Sends only the first matching rule (in insertion order)."
   [{:keys [channel-id content] :as msg}]
   (when (and channel-id
              (not (bot-message? msg))
@@ -142,7 +131,7 @@
           :text (do (send-text! channel-id (:text reply)) true)
           :url  (do (send-text! channel-id (:url reply)) true)
 
-          ;; back-compat with old file rules, if any
+          ;; back-compat
           :file (let [rel (:file reply)
                       f (io/file "src/pigeonbot/media" rel)]
                   (if (.exists f)
@@ -150,3 +139,55 @@
                     (do (println "maybe-react!: missing file for rule" rel) nil)))
 
           nil)))))
+
+;; -----------------------------------------------------------------------------
+;; Management (level-3 QoL)
+;; -----------------------------------------------------------------------------
+
+(defn list-reacts
+  "Return a vector of summary maps like:
+   {:trigger \"sandwich\" :type :text :preview \"did you mean...\"}"
+  []
+  (->> @rules*
+       (map (fn [{:keys [trigger reply]}]
+              (let [t (:type reply)
+                    preview (case t
+                              :text (:text reply)
+                              :url  (:url reply)
+                              :file (:file reply)
+                              nil)]
+                {:trigger trigger
+                 :type t
+                 :preview (str (or preview ""))})))
+       vec))
+
+(defn delete-trigger!
+  "Delete ALL rules for trigger. Returns count removed."
+  [trigger]
+  (let [before (count @rules*)]
+    (swap! rules* #(remove (fn [r] (= (:trigger r) trigger)) %))
+    (save!)
+    (- before (count @rules*))))
+
+(defn clear!
+  "Delete ALL react rules. Returns count removed."
+  []
+  (let [n (count @rules*)]
+    (reset! rules* [])
+    (save!)
+    n))
+
+(defn set-text!
+  "Replace ALL rules for trigger with a single text rule (edit behavior).
+  Returns {:ok? true}."
+  [trigger new-text author-id]
+  (swap! rules*
+         (fn [rs]
+           (let [kept (remove (fn [r] (= (:trigger r) trigger)) rs)]
+             (conj (vec kept)
+                   {:trigger  (str trigger)
+                    :reply    {:type :text :text (str new-text)}
+                    :added-by (str author-id)
+                    :added-at (System/currentTimeMillis)}))))
+  (save!)
+  {:ok? true})
