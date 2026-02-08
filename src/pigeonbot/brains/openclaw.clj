@@ -204,8 +204,7 @@
         prompt (str
                 "Look at the image at this URL and return labels useful for triggering bot rules.\n"
                 "URL: " (str image-url) "\n\n"
-                "Strong preference: include brand/model labels ONLY when clearly supported by visible text, logos, engravings, or unmistakable markings.\n"
-                "DO NOT GUESS brand/model. If uncertain, do not include it.\n"
+                "Strong preference: include brand/model labels supported by visible text, logos, engravings, or unmistakable markings.\n"
                 "Also include generic labels (e.g., \"handgun\", \"cat\", \"bicycle\").\n\n"
                 "Return ONLY valid JSON (no markdown, no commentary):\n"
                 "{\"labels\":[\"label1\",\"label2\"],\"confidence\":[0.9,0.7]}\n"
