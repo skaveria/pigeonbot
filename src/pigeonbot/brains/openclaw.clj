@@ -185,23 +185,34 @@
 
 (defn classify-image-url
   "Ask OpenClaw to look at an image URL and return a vector of label strings.
-  The OpenClaw agent must be able to fetch URLs + do vision.
+  Returns {:labels [...] :raw \"...\" :parsed {...}}.
 
-  Returns {:labels [\"opossum\" ...] :raw \"...\" :parsed {...}}"
+  Designed to be fast + strict:
+  - JSON only
+  - max 6 labels
+  - temperature 0
+  - max_tokens small"
   [image-url]
   (let [{:keys [url agent-id token timeout]} (cfg)
+        ;; optional: allow a dedicated vision agent via config.edn
+        cfgm (config/load-config)
+        vision-agent (or (:openclaw-vision-agent-id cfgm) agent-id)
+
         ep (endpoint url "/v1/chat/completions")
         prompt (str
-                "Look at the image at this URL:\n"
-                "URL: " image-url "\n\n"
-                "Return ONLY valid JSON (no markdown): "
-                "{\"labels\":[\"label1\",\"label2\",\"label3\"]} "
-                "Use short concrete nouns. Lowercase. Max 8 labels.")
+                "Classify the image at this URL with short noun labels.\n"
+                "URL: " (str image-url) "\n\n"
+                "Return ONLY valid JSON, no markdown, no commentary:\n"
+                "{\"labels\":[\"label1\",\"label2\"],\"confidence\":[0.9,0.7]}\n"
+                "Rules: lowercase labels, max 6 labels, confidence 0..1, same length arrays.\n"
+                "If you cannot fetch/see the image, return: {\"labels\":[],\"confidence\":[]}.")
         payload {:model "openclaw"
+                 :temperature 0
+                 :max_tokens 120
                  :messages [{:role "user" :content prompt}]}
         headers {"Authorization" (str "Bearer " token)
                  "Content-Type" "application/json"
-                 "x-openclaw-agent-id" agent-id}
+                 "x-openclaw-agent-id" (str vision-agent)}
         {:keys [status body error]}
         @(http/post ep {:headers headers
                         :body (json/encode payload)
@@ -215,9 +226,15 @@
 
       :else
       (let [raw (-> (extract-content body) str str/trim)
-            parsed (try (json/decode raw true) (catch Throwable _ nil))
+
+            ;; robust parse: accept code fences / chatter by extracting last {...}
+            parsed (or (when-let [ms (seq (re-seq #"\{[^{}]*\}" raw))]
+                         (try (json/decode (last ms) true) (catch Throwable _ nil)))
+                       (try (json/decode raw true) (catch Throwable _ nil)))
+
             labels (->> (or (:labels parsed) [])
                         (map (comp str/lower-case str/trim str))
                         (remove str/blank?)
+                        (take 6)
                         vec)]
         {:labels labels :raw raw :parsed parsed}))))
