@@ -43,12 +43,9 @@
 (defn- first-image-url [msg]
   (let [atts (or (:attachments msg) [])]
     (log! "vision-reacts: attachments count =" (count atts))
-    (some->> atts
-             (filter image-attachment?)
-             first
-             (fn [att]
-               (or (:proxy-url att) (:proxy_url att) (:url att)))
-             strip-trailing-junk)))
+    (when-let [att (->> atts (filter image-attachment?) first)]
+      (-> (or (:proxy-url att) (:proxy_url att) (:url att))
+          strip-trailing-junk))))
 
 (defn- normalize-emoji [s]
   (let [s (str/trim (str s))]
