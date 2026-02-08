@@ -55,7 +55,7 @@
     :message-reaction-add
     (rr/handle-reaction-add! event-data)
 
-    :message-reaction-emove
+    :message-reaction-remove
     (rr/handle-reaction-remove! event-data)
 
     nil))
