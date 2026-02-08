@@ -87,9 +87,15 @@
   - fast JSON-only output
   - brand/model preference (no guessing)
   - small output (max 6 labels)
-  - uses :openclaw-vision-agent-id (default \"vision\")"
+  - uses :openclaw-vision-agent-id (default \"vision\")
+  - forces the model via :openclaw-vision-model-id (e.g. Haiku) if provided"
   [image-url]
   (let [{:keys [url vision-agent-id token timeout]} (cfg)
+        cfgm (config/load-config)
+        ;; Force the model for vision calls if configured (this is what gets you off Opus).
+        ;; If unset, fall back to "openclaw" (OpenClaw default routing).
+        vision-model (or (:openclaw-vision-model-id cfgm) "openclaw")
+
         _ (when-not (and (string? token) (seq token))
             (throw (ex-info "Missing OpenClaw token" {})))
 
@@ -106,7 +112,7 @@
                 "- max 6 labels\n"
                 "- confidence 0..1 (same length as labels)\n"
                 "- if you cannot fetch/see the image, return {\"labels\":[],\"confidence\":[]}\n")
-        payload {:model "openclaw"
+        payload {:model vision-model
                  :temperature 0
                  :max_tokens 140
                  :messages [{:role "user" :content prompt}]}
