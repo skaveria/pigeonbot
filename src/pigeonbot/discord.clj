@@ -50,7 +50,7 @@
 
   ;; vision rules (image -> labels -> actions)
   (vision-reacts/maybe-react-vision! event-data)
-  (vision/maybe-react-opossum! event-data))
+  (vision-reacts/maybe-react-opossum! event-data))
 
     :message-reaction-add
     (rr/handle-reaction-add! event-data)
