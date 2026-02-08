@@ -10,16 +10,26 @@
 (defonce ^:private processed-message-ids* (atom #{}))
 (defonce ^:private last-channel-ts* (atom {}))
 
+;; Cache: image-url -> {:labels [...] :ts <ms>}
+(defonce ^:private vision-cache* (atom {}))
+
 (defn- cfg []
   (let [m (config/load-config)]
     {:debug? (true? (:vision-debug? m))
      :enabled? (not= false (:vision-enabled? m))
      :max-actions (long (or (:vision-max-actions m) 2))
-     :cooldown-ms (long (or (:vision-cooldown-ms m) 0))}))
+     :cooldown-ms (long (or (:vision-cooldown-ms m) 0))
+
+     ;; caching knobs
+     :cache-enabled? (not= false (:vision-cache-enabled? m))
+     :cache-ttl-ms (long (or (:vision-cache-ttl-ms m) (* 24 60 60 1000)))  ;; 24h
+     :cache-max-entries (long (or (:vision-cache-max-entries m) 500))}))   ;; 500 urls
 
 (defn- log! [& xs]
   (when (:debug? (cfg))
     (apply println xs)))
+
+(defn- now-ms [] (System/currentTimeMillis))
 
 (defn- bot-message? [msg]
   (true? (get-in msg [:author :bot])))
@@ -38,6 +48,7 @@
         (re-find #"\.(png|jpe?g|gif|webp)$" (str/lower-case u)))))
 
 (defn- strip-trailing-junk [u]
+  ;; keep signed querystrings, just remove trailing &/? that causes "&&" bugs
   (-> (str u) str/trim (str/replace #"[?&]+$" "")))
 
 (defn- first-image-url [msg]
@@ -66,29 +77,84 @@
   (let [{:keys [cooldown-ms]} (cfg)]
     (if (<= cooldown-ms 0)
       true
-      (let [now (System/currentTimeMillis)
+      (let [now (now-ms)
             last-ts (get @last-channel-ts* (str channel-id) 0)]
         (when (>= (- now last-ts) cooldown-ms)
           (swap! last-channel-ts* assoc (str channel-id) now)
           true)))))
 
+;; Wildcard matcher: if any match string is contained in any label string.
 (defn- match-rule?
-  "Return true if ANY rule match string is contained within ANY label string.
-  Case-insensitive, substring match.
-  Example: \"m855\" matches \"m855 green tip\"."
   [labels {:keys [match]}]
   (let [labels (map str/lower-case (or labels []))
         matches (map str/lower-case (or match []))]
     (some (fn [m]
-            (some (fn [lbl]
-                    (str/includes? lbl m))
-                  labels))
+            (some (fn [lbl] (str/includes? lbl m)) labels))
           matches)))
+
+;; -----------------------------------------------------------------------------
+;; Cache helpers
+;; -----------------------------------------------------------------------------
+
+(defn- cache-get
+  [img-url]
+  (let [{:keys [cache-enabled? cache-ttl-ms]} (cfg)]
+    (when cache-enabled?
+      (when-let [{:keys [labels ts] :as entry} (get @vision-cache* img-url)]
+        (if (<= (- (now-ms) (long ts)) cache-ttl-ms)
+          labels
+          (do
+            (swap! vision-cache* dissoc img-url)
+            nil))))))
+
+(defn- prune-cache!
+  []
+  (let [{:keys [cache-max-entries cache-ttl-ms]} (cfg)
+        now (now-ms)]
+    (swap! vision-cache*
+           (fn [m]
+             ;; drop expired
+             (let [m1 (into {} (remove (fn [[_ {:keys [ts]}]]
+                                        (> (- now (long ts)) cache-ttl-ms)))
+                               m)]
+               ;; if too big, evict oldest
+               (if (<= (count m1) cache-max-entries)
+                 m1
+                 (let [sorted (sort-by (fn [[_ {:keys [ts]}]] (long ts)) m1)
+                       drop-n (- (count m1) cache-max-entries)
+                       victims (set (map first (take drop-n sorted)))]
+                   (apply dissoc m1 victims))))))))
+
+(defn- cache-put!
+  [img-url labels]
+  (let [{:keys [cache-enabled?]} (cfg)]
+    (when cache-enabled?
+      (swap! vision-cache* assoc img-url {:labels (vec labels) :ts (now-ms)})
+      (prune-cache!))))
+
+(defn- classify-with-cache
+  [img-url]
+  (if-let [labels (cache-get img-url)]
+    (do (log! "vision-reacts: cache hit" img-url)
+        labels)
+    (let [{:keys [labels raw parsed]} (oc/classify-image-url img-url)
+          labels (or labels [])]
+      (log! "vision-reacts: cache miss" img-url)
+      (log! "vision-reacts: labels =" (pr-str labels))
+      ;; Uncomment if you need to debug JSON parsing:
+      ;; (log! "vision-reacts: raw =" (pr-str raw))
+      ;; (log! "vision-reacts: parsed =" (pr-str parsed))
+      (cache-put! img-url labels)
+      labels)))
+
+;; -----------------------------------------------------------------------------
+;; Main entry
+;; -----------------------------------------------------------------------------
 
 (defn maybe-react-vision!
   "Rule-driven vision handler:
   - if message has an image attachment
-  - classify once via OpenClaw (labels)
+  - classify once via OpenClaw (labels), cached by URL
   - apply matching rules from vision_rules.edn
   - execute actions (:react, :reply)
 
@@ -106,32 +172,31 @@
         (swap! processed-message-ids* conj mid)
         (future
           (try
-            ;; ensure rules loaded
+            ;; Load rules each time (cheap) so Discord commands take effect immediately.
             (vr/load!)
-            (let [{:keys [labels raw parsed] :as out} (oc/classify-image-url img-url)
-                  labels (or labels [])
-                  _ (log! "vision-reacts: labels =" (pr-str labels))
-                  rules (vr/list-rules)
-                  matches (->> rules
-                               (filter (partial match-rule? labels))
-                               (take max-actions)
-                               vec)
-                  message-id id] ;; capture the Discord message id (avoid shadowing)
-              (doseq [{:keys [actions id] :as rule} matches]
-                (let [rule-id id]
-                  (when-let [emoji (:react actions)]
-                    (log! "vision-reacts: rule" rule-id "react" emoji "→ message" message-id)
-                    (let [ch (add-reaction! channel-id message-id emoji)
-                          resp (when (instance? clojure.lang.IDeref ch)
-                                 (deref ch 8000 :timeout))]
-                      (log! "vision-reacts: reaction resp =" (pr-str resp))))
-                  (when-let [reply (:reply actions)]
-                    (log! "vision-reacts: rule" rule-id "reply → message" message-id)
-                    (u/send-reply! channel-id message-id
-                                   :content (u/clamp-discord reply))))))
-
+            (let [rules (vr/list-rules)]
+              (if (empty? rules)
+                (log! "vision-reacts: no rules; skipping classification")
+                (let [labels (classify-with-cache img-url)
+                      matches (->> rules
+                                   (filter (partial match-rule? labels))
+                                   (take max-actions)
+                                   vec)
+                      message-id id] ;; capture the Discord message id (avoid shadowing)
+                  (doseq [{:keys [actions id] :as rule} matches]
+                    (let [rule-id id]
+                      (when-let [emoji (:react actions)]
+                        (log! "vision-reacts: rule" rule-id "react" emoji "→ message" message-id)
+                        (let [ch (add-reaction! channel-id message-id emoji)
+                              resp (when (instance? clojure.lang.IDeref ch)
+                                     (deref ch 8000 :timeout))]
+                          (log! "vision-reacts: reaction resp =" (pr-str resp))))
+                      (when-let [reply (:reply actions)]
+                        (log! "vision-reacts: rule" rule-id "reply → message" message-id)
+                        (u/send-reply! channel-id message-id
+                                       :content (u/clamp-discord reply)))))))))
             (catch Throwable t
+              ;; allow retry on next message if something blew up
               (swap! processed-message-ids* disj mid)
               (log! "vision-reacts: ERROR:" (.getMessage t) (or (ex-data t) {})))))
-        true))))
-;;wo
+        true)))
