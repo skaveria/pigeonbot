@@ -56,7 +56,9 @@
       (seq s) s
       :else "🦝")))
 
-(defn- add-reaction! [channel-id message-id emoji]
+(defn- add-reaction!
+  "Adds a reaction and returns the discljord promise channel (or nil)."
+  [channel-id message-id emoji]
   (when-let [messaging (:messaging @state)]
     (m/create-reaction! messaging channel-id message-id (normalize-emoji emoji))))
 
@@ -99,21 +101,28 @@
           (try
             ;; ensure rules loaded
             (vr/load!)
-            (let [{:keys [labels raw]} (oc/classify-image-url img-url)
+            (let [{:keys [labels raw parsed] :as out} (oc/classify-image-url img-url)
                   labels (or labels [])
                   _ (log! "vision-reacts: labels =" (pr-str labels))
                   rules (vr/list-rules)
                   matches (->> rules
                                (filter (partial match-rule? labels))
                                (take max-actions)
-                               vec)]
-              (doseq [{:keys [actions id]} matches]
-                (when-let [emoji (:react actions)]
-                  (log! "vision-reacts: rule" id "react" emoji)
-                  (add-reaction! channel-id id emoji))
-                (when-let [reply (:reply actions)]
-                  (log! "vision-reacts: rule" id "reply")
-                  (u/send-reply! channel-id id :content (u/clamp-discord reply)))))
+                               vec)
+                  message-id id] ;; capture the Discord message id (avoid shadowing)
+              (doseq [{:keys [actions id] :as rule} matches]
+                (let [rule-id id]
+                  (when-let [emoji (:react actions)]
+                    (log! "vision-reacts: rule" rule-id "react" emoji "→ message" message-id)
+                    (let [ch (add-reaction! channel-id message-id emoji)
+                          resp (when (instance? clojure.lang.IDeref ch)
+                                 (deref ch 8000 :timeout))]
+                      (log! "vision-reacts: reaction resp =" (pr-str resp))))
+                  (when-let [reply (:reply actions)]
+                    (log! "vision-reacts: rule" rule-id "reply → message" message-id)
+                    (u/send-reply! channel-id message-id
+                                   :content (u/clamp-discord reply))))))
+
             (catch Throwable t
               (swap! processed-message-ids* disj mid)
               (log! "vision-reacts: ERROR:" (.getMessage t) (or (ex-data t) {})))))
