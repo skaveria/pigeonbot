@@ -140,3 +140,4 @@
                         (take 6)
                         vec)]
         {:labels labels :raw raw :parsed parsed}))))
+;finally
