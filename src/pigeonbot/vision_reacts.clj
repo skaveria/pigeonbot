@@ -73,10 +73,17 @@
           true)))))
 
 (defn- match-rule?
+  "Return true if ANY rule match string is contained within ANY label string.
+  Case-insensitive, substring match.
+  Example: \"m855\" matches \"m855 green tip\"."
   [labels {:keys [match]}]
-  (let [labels (set (map str/lower-case (or labels [])))
-        ms (set (map str/lower-case (or match [])))]
-    (some labels ms)))
+  (let [labels (map str/lower-case (or labels []))
+        matches (map str/lower-case (or match []))]
+    (some (fn [m]
+            (some (fn [lbl]
+                    (str/includes? lbl m))
+                  labels))
+          matches)))
 
 (defn maybe-react-vision!
   "Rule-driven vision handler:
@@ -127,4 +134,4 @@
               (swap! processed-message-ids* disj mid)
               (log! "vision-reacts: ERROR:" (.getMessage t) (or (ex-data t) {})))))
         true))))
-;;woo
+;;wo
