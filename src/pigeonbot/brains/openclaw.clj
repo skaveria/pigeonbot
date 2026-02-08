@@ -184,31 +184,39 @@
   (:opossum? (opossum-in-image-debug image-url)))
 
 (defn classify-image-url
-  "Ask OpenClaw to look at an image URL and return a vector of label strings.
+  "Ask OpenClaw to look at an image URL and return label strings.
   Returns {:labels [...] :raw \"...\" :parsed {...}}.
 
-  Designed to be fast + strict:
+  Tuned to prefer brand/model labels when CLEARLY supported by visible text/logo/markings.
+  No guessing: if not clearly visible, omit brand/model labels.
+
+  Still fast/strict:
   - JSON only
   - max 6 labels
   - temperature 0
   - max_tokens small"
   [image-url]
   (let [{:keys [url agent-id token timeout]} (cfg)
-        ;; optional: allow a dedicated vision agent via config.edn
         cfgm (config/load-config)
         vision-agent (or (:openclaw-vision-agent-id cfgm) agent-id)
 
         ep (endpoint url "/v1/chat/completions")
         prompt (str
-                "Classify the image at this URL with short noun labels.\n"
+                "Look at the image at this URL and return labels useful for triggering bot rules.\n"
                 "URL: " (str image-url) "\n\n"
-                "Return ONLY valid JSON, no markdown, no commentary:\n"
+                "Strong preference: include brand/model labels ONLY when clearly supported by visible text, logos, engravings, or unmistakable markings.\n"
+                "DO NOT GUESS brand/model. If uncertain, do not include it.\n"
+                "Also include generic labels (e.g., \"handgun\", \"cat\", \"bicycle\").\n\n"
+                "Return ONLY valid JSON (no markdown, no commentary):\n"
                 "{\"labels\":[\"label1\",\"label2\"],\"confidence\":[0.9,0.7]}\n"
-                "Rules: lowercase labels, max 6 labels, confidence 0..1, same length arrays.\n"
-                "If you cannot fetch/see the image, return: {\"labels\":[],\"confidence\":[]}.")
+                "Rules:\n"
+                "- lowercase labels\n"
+                "- max 6 labels\n"
+                "- confidence 0..1 (same length as labels)\n"
+                "- if you cannot fetch/see the image, return {\"labels\":[],\"confidence\":[]}\n")
         payload {:model "openclaw"
                  :temperature 0
-                 :max_tokens 120
+                 :max_tokens 140
                  :messages [{:role "user" :content prompt}]}
         headers {"Authorization" (str "Bearer " token)
                  "Content-Type" "application/json"
