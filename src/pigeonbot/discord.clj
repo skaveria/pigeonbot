@@ -2,7 +2,6 @@
   (:require [clojure.core.async :as a]
             [clojure.string :as str]
             [discljord.connections :as c]
-            [pigeonbot.vision-reacts :as vision]
             [discljord.events :as e]
             [discljord.messaging :as m]
             [pigeonbot.channels :as channels]
@@ -56,7 +55,7 @@
     :message-reaction-add
     (rr/handle-reaction-add! event-data)
 
-    :message-reaction-remove
+    :message-reaction-emove
     (rr/handle-reaction-remove! event-data)
 
     nil))
