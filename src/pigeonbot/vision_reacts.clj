@@ -20,10 +20,9 @@
      :max-actions (long (or (:vision-max-actions m) 2))
      :cooldown-ms (long (or (:vision-cooldown-ms m) 0))
 
-     ;; caching knobs
      :cache-enabled? (not= false (:vision-cache-enabled? m))
      :cache-ttl-ms (long (or (:vision-cache-ttl-ms m) (* 24 60 60 1000))) ;; 24h
-     :cache-max-entries (long (or (:vision-cache-max-entries m) 500))})) ;; 500 urls
+     :cache-max-entries (long (or (:vision-cache-max-entries m) 500))}))
 
 (defn- log! [& xs]
   (when (:debug? (cfg))
@@ -48,7 +47,7 @@
         (re-find #"\.(png|jpe?g|gif|webp)$" (str/lower-case u)))))
 
 (defn- strip-trailing-junk [u]
-  ;; keep signed querystrings, only remove trailing &/? which causes "&&"
+  ;; keep signed querystrings; only remove trailing &/? (avoids '&&' bugs)
   (-> (str u) str/trim (str/replace #"[?&]+$" "")))
 
 (defn- first-image-url [msg]
@@ -109,12 +108,10 @@
         now (now-ms)]
     (swap! vision-cache*
            (fn [m]
-             ;; drop expired
              (let [m1 (into {}
                             (remove (fn [[_ {:keys [ts]}]]
                                       (> (- now (long ts)) cache-ttl-ms)))
                             m)]
-               ;; evict oldest if too big
                (if (<= (count m1) cache-max-entries)
                  m1
                  (let [sorted (sort-by (fn [[_ {:keys [ts]}]] (long ts)) m1)
@@ -136,18 +133,23 @@
           labels (or labels [])]
       (log! "vision-reacts: cache miss" img-url)
       (log! "vision-reacts: labels =" (pr-str labels))
-      ;; uncomment for troubleshooting:
+      ;; uncomment while tuning:
       ;; (log! "vision-reacts: raw =" (pr-str raw))
       ;; (log! "vision-reacts: parsed =" (pr-str parsed))
       (cache-put! img-url labels)
       labels)))
 
 ;; -----------------------------------------------------------------------------
-;; Main entry
+;; Paren-safe dispatch helpers
 ;; -----------------------------------------------------------------------------
 
+(defn- compute-matches [rules labels max-actions]
+  (->> rules
+       (filter (partial match-rule? labels))
+       (take max-actions)
+       vec))
+
 (defn- apply-rule-actions!
-  "Execute actions for one matched rule against a Discord message."
   [channel-id message-id {:keys [id actions]}]
   (let [rule-id id]
     (when-let [emoji (:react actions)]
@@ -161,20 +163,7 @@
       (u/send-reply! channel-id message-id
                      :content (u/clamp-discord reply)))))
 
-(defn- compute-matches
-  "Given rules and labels, return up to max-actions matched rules."
-  [rules labels max-actions]
-  (->> rules
-       (filter (partial match-rule? labels))
-       (take max-actions)
-       vec))
-
 (defn- process-vision-message!
-  "Background worker:
-  - loads rules
-  - classifies image (cached)
-  - matches rules
-  - applies actions"
   [{:keys [channel-id id]} img-url max-actions]
   (vr/load!)
   (let [rules (vr/list-rules)]
@@ -186,13 +175,15 @@
         (doseq [rule matches]
           (apply-rule-actions! channel-id message-id rule))))))
 
+;; -----------------------------------------------------------------------------
+;; Main entry point
+;; -----------------------------------------------------------------------------
+
 (defn maybe-react-vision!
   "Rule-driven vision handler:
   - image attachment -> classify via OpenClaw (cached by URL)
   - match against vision_rules.edn
-  - execute actions (:react, :reply)
-
-  Returns true if it kicked off processing."
+  - execute actions (:react, :reply)"
   [{:keys [id channel-id content] :as msg}]
   (let [{:keys [enabled? max-actions]} (cfg)
         mid (some-> id str)]
