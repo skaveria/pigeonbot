@@ -146,6 +146,46 @@
 ;; Main entry
 ;; -----------------------------------------------------------------------------
 
+(defn- apply-rule-actions!
+  "Execute actions for one matched rule against a Discord message."
+  [channel-id message-id {:keys [id actions]}]
+  (let [rule-id id]
+    (when-let [emoji (:react actions)]
+      (log! "vision-reacts: rule" rule-id "react" emoji "→ message" message-id)
+      (let [ch (add-reaction! channel-id message-id emoji)
+            resp (when (instance? clojure.lang.IDeref ch)
+                   (deref ch 8000 :timeout))]
+        (log! "vision-reacts: reaction resp =" (pr-str resp))))
+    (when-let [reply (:reply actions)]
+      (log! "vision-reacts: rule" rule-id "reply → message" message-id)
+      (u/send-reply! channel-id message-id
+                     :content (u/clamp-discord reply)))))
+
+(defn- compute-matches
+  "Given rules and labels, return up to max-actions matched rules."
+  [rules labels max-actions]
+  (->> rules
+       (filter (partial match-rule? labels))
+       (take max-actions)
+       vec))
+
+(defn- process-vision-message!
+  "Background worker:
+  - loads rules
+  - classifies image (cached)
+  - matches rules
+  - applies actions"
+  [{:keys [channel-id id]} img-url max-actions]
+  (vr/load!)
+  (let [rules (vr/list-rules)]
+    (if (empty? rules)
+      (log! "vision-reacts: no rules; skipping classification")
+      (let [labels (classify-with-cache img-url)
+            matches (compute-matches rules labels max-actions)
+            message-id id]
+        (doseq [rule matches]
+          (apply-rule-actions! channel-id message-id rule))))))
+
 (defn maybe-react-vision!
   "Rule-driven vision handler:
   - image attachment -> classify via OpenClaw (cached by URL)
@@ -166,29 +206,8 @@
         (swap! processed-message-ids* conj mid)
         (future
           (try
-            (vr/load!)
-            (let [rules (vr/list-rules)]
-              (if (empty? rules)
-                (log! "vision-reacts: no rules; skipping classification")
-                (let [labels (classify-with-cache img-url)
-                      matches (->> rules
-                                   (filter (partial match-rule? labels))
-                                   (take max-actions)
-                                   vec)
-                      message-id id] ;; capture Discord message id once
-                  (doseq [{:keys [actions id] :as rule} matches]
-                    (let [rule-id id]
-                      (when-let [emoji (:react actions)]
-                        (log! "vision-reacts: rule" rule-id "react" emoji "→ message" message-id)
-                        (let [ch (add-reaction! channel-id message-id emoji)
-                              resp (when (instance? clojure.lang.IDeref ch)
-                                     (deref ch 8000 :timeout))]
-                          (log! "vision-reacts: reaction resp =" (pr-str resp))))
-                      (when-let [reply (:reply actions)]
-                        (log! "vision-reacts: rule" rule-id "reply → message" message-id)
-                        (u/send-reply! channel-id message-id
-                                       :content (u/clamp-discord reply)))))))))
+            (process-vision-message! msg img-url max-actions)
             (catch Throwable t
               (swap! processed-message-ids* disj mid)
               (log! "vision-reacts: ERROR:" (.getMessage t) (or (ex-data t) {})))))
-        true)))
+        true))))
