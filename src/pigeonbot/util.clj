@@ -27,14 +27,14 @@
 (defn send!
   "Safely send a Discord message. Returns a response channel or nil."
   [channel-id & {:keys [content file allowed-mentions] :or {content ""}}]
+  ;; If we speak in a thread channel, this is how we 'subscribe' to it for
+  ;; subsequent no-@ messages.
+  (threads/note-bot-spoke! channel-id)
   (if-let [messaging (:messaging @state)]
-    (let [ch (m/create-message! messaging channel-id
-                               :content (or content "")
-                               :file file
-                               :allowed_mentions allowed-mentions)]
-      ;; If we're speaking in a thread, mark it as an active conversational thread.
-      (threads/note-bot-spoke! channel-id)
-      ch)
+    (m/create-message! messaging channel-id
+                      :content (or content "")
+                      :file file
+                      :allowed_mentions allowed-mentions)
     (do
       (println "send!: messaging is nil (bot not ready?)")
       nil)))
@@ -42,15 +42,13 @@
 (defn send-reply!
   "Reply to a specific message id in the same channel, without pinging replied user."
   [channel-id reply-to-message-id & {:keys [content file]}]
+  (threads/note-bot-spoke! channel-id)
   (if-let [messaging (:messaging @state)]
-    (let [ch (m/create-message! messaging channel-id
-                               :content (or content "")
-                               :file file
-                               :message_reference {:message_id (str reply-to-message-id)}
-                               :allowed_mentions {:replied_user false})]
-      ;; If we're speaking in a thread, mark it as an active conversational thread.
-      (threads/note-bot-spoke! channel-id)
-      ch)
+    (m/create-message! messaging channel-id
+                      :content (or content "")
+                      :file file
+                      :message_reference {:message_id (str reply-to-message-id)}
+                      :allowed_mentions {:replied_user false})
     (do
       (println "send-reply!: messaging is nil (bot not ready?)")
       nil)))

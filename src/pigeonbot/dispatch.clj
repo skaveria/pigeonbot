@@ -19,7 +19,7 @@
   "Dispatch order:
   1) built-in commands (!ping, !ask, etc)
   2) custom commands (CDN URL-based)
-  3) thread continuation: if pigeonbot has spoken in this thread, treat new messages as ask
+  3) thread continuation (Option B): if pigeonbot has spoken in this thread, treat new messages as ask
   4) ask-like triggers (reply / @mention)"
   [{:keys [content channel-id id] :as msg}]
   (let [cmd (first (str/split (or content "") #"\s+"))]
@@ -40,13 +40,14 @@
                   (when (.exists f)
                     (u/send-file! channel-id f))
                   true)
+
           nil))
       nil
 
-      ;; 3) thread continuation (no @ needed)
+      ;; 3) thread continuation: no @ needed after pigeonbot has spoken once in the thread
       (threads/should-auto-ask? msg)
       (do
-        ;; Reply to the message in-thread so it stays tidy.
+        ;; Keep it tidy by replying to the triggering message in-thread.
         (ask/run-ask! msg (str/trim (or content "")) (str id))
         true)
 
