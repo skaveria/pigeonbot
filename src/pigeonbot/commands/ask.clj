@@ -1,6 +1,7 @@
 (ns pigeonbot.commands.ask
   (:require [clojure.core.async :as async]
             [clojure.string :as str]
+            [pigeonbot.threads :as threads]
             [pigeonbot.context :as ctx]
             [pigeonbot.brain :as brain]
             [pigeonbot.state :refer [state]]
@@ -62,6 +63,17 @@
   Uses typing indicator instead of \"Hm. Lemme think…\"."
   ([msg question] (run-ask! msg question nil))
   ([{:keys [channel-id] :as msg} question reply-to-id]
+   ;; If this ask is happening inside a thread, mark that thread as “active”
+   ;; so subsequent messages in the same thread can auto-trigger asks without @.
+   (try
+     (when (and (resolve 'pigeonbot.threads/thread-channel?)
+                (resolve 'pigeonbot.threads/note-bot-spoke!))
+       (let [thread-channel? (deref (resolve 'pigeonbot.threads/thread-channel?))
+             note-bot-spoke! (deref (resolve 'pigeonbot.threads/note-bot-spoke!))]
+         (when (thread-channel? msg)
+           (note-bot-spoke! channel-id))))
+     (catch Throwable _ nil))
+
    (let [question (str/trim (or question ""))]
      (if (str/blank? question)
        (u/send! channel-id :content "Usage: !ask <question> (or reply / @mention me)")
