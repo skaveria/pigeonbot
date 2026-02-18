@@ -5,5 +5,5 @@ custom_commands.edn
 react_rules.edn
 *.log
 tmp/
-
+.claude/
 
