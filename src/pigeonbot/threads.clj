@@ -5,10 +5,7 @@
 ;; 10 = AnnouncementThread, 11 = PublicThread, 12 = PrivateThread
 (def ^:private thread-channel-types #{10 11 12})
 
-(defonce active-thread-ids*
-  "Set of Discord channel IDs (strings) that represent thread channels where
-  pigeonbot has spoken at least once during this process lifetime."
-  (atom #{}))
+(defonce active-thread-ids* (atom #{}))
 
 (defn thread-channel?
   "Return true if this message channel is a thread, based on :channel-type."
