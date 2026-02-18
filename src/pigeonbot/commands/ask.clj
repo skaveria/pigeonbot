@@ -63,16 +63,10 @@
   Uses typing indicator instead of \"Hm. Lemme think…\"."
   ([msg question] (run-ask! msg question nil))
   ([{:keys [channel-id] :as msg} question reply-to-id]
-   ;; If this ask is happening inside a thread, mark that thread as “active”
-   ;; so subsequent messages in the same thread can auto-trigger asks without @.
-   (try
-     (when (and (resolve 'pigeonbot.threads/thread-channel?)
-                (resolve 'pigeonbot.threads/note-bot-spoke!))
-       (let [thread-channel? (deref (resolve 'pigeonbot.threads/thread-channel?))
-             note-bot-spoke! (deref (resolve 'pigeonbot.threads/note-bot-spoke!))]
-         (when (thread-channel? msg)
-           (note-bot-spoke! channel-id))))
-     (catch Throwable _ nil))
+   ;; If we're asking inside a thread, mark the thread active so follow-up messages
+   ;; (without @) will continue the conversation.
+   (when (threads/thread-channel? msg)
+     (threads/note-thread-active! channel-id))
 
    (let [question (str/trim (or question ""))]
      (if (str/blank? question)
