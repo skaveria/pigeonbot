@@ -55,9 +55,6 @@
                        (= (some-> author-id str) bid)))
                 (ctx/recent-messages channel-id))))))
 
-(defn- build-ask-context [msg]
-  (ctx/context-text msg))
-
 (defn run-ask!
   "Core ask runner. If reply-to-id provided, sends as a reply.
   Uses typing indicator instead of \"Hm. Lemme think…\"."
@@ -84,8 +81,10 @@
 
          (future
            (try
-             (let [context-text (build-ask-context msg)
-                   reply (brain/ask-with-context context-text question)
+             (let [reply (brain/ask! {:channel-id channel-id
+                                      :author-id  (some-> (get-in msg [:author :id]) str)
+                                      :question   question
+                                      :msg-id     (some-> (:id msg) str)})
                    reply (u/clamp-discord reply)]
                (reset! done? true)
                (if reply-to-id

@@ -8,6 +8,7 @@
   org.clojure/data.json {:mvn/version "2.5.1"}
   http-kit/http-kit {:mvn/version "2.7.0"}
   cheshire/cheshire {:mvn/version "5.12.0"}
+  datalevin/datalevin {:mvn/version "0.10.4"}
 
   ;; Make CIDER middleware available in service mode too
   cider/cider-nrepl {:mvn/version "0.47.1"}}

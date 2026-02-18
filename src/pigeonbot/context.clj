@@ -1,83 +1,37 @@
 (ns pigeonbot.context
-  (:require [clojure.string :as str]))
-
-(def ^:private max-context-messages
-  "How many recent messages per channel to keep in memory."
-  20)
-
-(defonce ^{:doc "Map: channel-id(string) -> vector of message maps (most-recent last).
-Each entry: {:id :channel-id :author :author-id :bot? :content :timestamp}."}
-  histories*
-  (atom {}))
-
-(defn- chan-id->key [channel-id]
-  (str channel-id))
-
-(defn- normalize-author
-  "Extract a stable display name, author-id, and bot flag from a Discord event payload."
-  [{:keys [author]}]
-  (let [a author
-        bot? (true? (:bot a))
-        name (or (:global_name a)
-                 (:username a)
-                 (get-in a [:user :username])
-                 "unknown")
-        author-id (or (:id a)
-                      (get-in a [:user :id]))]
-    {:name name :bot? bot? :author-id (some-> author-id str)}))
+  "Compatibility shim: forwards to pigeonbot.db.
+  The atom-based in-memory buffer has been replaced by Datalevin."
+  (:require [pigeonbot.db :as db]
+            [clojure.string :as str]))
 
 (defn record-message!
-  "Store a message-create payload into a per-channel rolling buffer.
-
-Stores minimal fields needed for context. Safe to call on every :message-create."
-  [{:keys [channel-id id content] :as msg}]
-  (when channel-id
-    (let [{:keys [name bot? author-id]} (normalize-author msg)
-          entry {:id (str id)
-                 :channel-id (str channel-id)
-                 :author name
-                 :author-id (str (or author-id ""))
-                 :bot? bot?
-                 :content (str (or content ""))
-                 :timestamp (str (or (:timestamp msg) ""))}]
-      (swap! histories*
-             (fn [m]
-               (let [k (chan-id->key channel-id)
-                     xs (vec (get m k []))
-                     xs (conj xs entry)
-                     xs (if (> (count xs) max-context-messages)
-                          (subvec xs (- (count xs) max-context-messages))
-                          xs)]
-                 (assoc m k xs)))))
-    true))
+  "Store a Discord message in Datalevin."
+  [msg]
+  (try (db/record-message! msg)
+       (catch Throwable t
+         (println "context/record-message! error:" (.getMessage t)))))
 
 (defn recent-messages
-  "Return up to the last N messages for channel-id.
-Optionally exclude a specific message id (e.g. the current message)."
+  "Return up to 20 recent messages for channel-id."
   ([channel-id] (recent-messages channel-id nil))
-  ([channel-id exclude-id]
-   (let [k (chan-id->key channel-id)
-         xs (get @histories* k [])]
-     (->> xs
-          (remove (fn [m] (and exclude-id (= (:id m) (str exclude-id)))))
-          vec))))
+  ([channel-id _exclude-id]
+   (db/recent-messages channel-id 20)))
 
 (defn format-context
-  "Turn recent messages into a compact transcript for the LLM."
+  "Format messages as a plain-text transcript."
   [msgs]
-  (let [line (fn [{:keys [author bot? content]}]
-               (let [speaker (if bot? (str author " (bot)") author)
-                     content (-> (or content "")
-                                 (str/replace #"\s+" " ")
-                                 (str/trim))]
-                 (str speaker ": " content)))]
-    (->> msgs
-         (map line)
-         (remove str/blank?)
-         (str/join "\n"))))
+  (->> msgs
+       (map (fn [{:keys [author bot? content]}]
+              (let [speaker (if bot? (str author " (bot)") author)
+                    content (-> (str (or content ""))
+                                (str/replace #"\s+" " ")
+                                str/trim)]
+                (str speaker ": " content))))
+       (remove str/blank?)
+       (str/join "\n")))
 
 (defn context-text
-  "High-level helper: given a message event payload, return the transcript string."
-  [{:keys [channel-id id]}]
-  (-> (recent-messages channel-id id)
+  "High-level helper: return transcript string for a channel."
+  [{:keys [channel-id]}]
+  (-> (recent-messages channel-id)
       format-context))

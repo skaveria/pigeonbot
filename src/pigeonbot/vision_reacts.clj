@@ -1,7 +1,6 @@
 (ns pigeonbot.vision-reacts
   (:require [clojure.string :as str]
             [discljord.messaging :as m]
-            [pigeonbot.brains.openclaw :as oc]
             [pigeonbot.commands.util :as u]
             [pigeonbot.config :as config]
             [pigeonbot.state :refer [state]]
@@ -125,19 +124,11 @@
       (swap! vision-cache* assoc img-url {:labels (vec labels) :ts (now-ms)})
       (prune-cache!))))
 
-(defn- classify-with-cache [img-url]
-  (if-let [labels (cache-get img-url)]
-    (do (log! "vision-reacts: cache hit" img-url)
-        labels)
-    (let [{:keys [labels raw parsed]} (oc/classify-image-url img-url)
-          labels (or labels [])]
-      (log! "vision-reacts: cache miss" img-url)
-      (log! "vision-reacts: labels =" (pr-str labels))
-      ;; uncomment while tuning:
-      ;; (log! "vision-reacts: raw =" (pr-str raw))
-      ;; (log! "vision-reacts: parsed =" (pr-str parsed))
-      (cache-put! img-url labels)
-      labels)))
+(defn- classify-with-cache [_img-url]
+  ;; Vision classification is temporarily disabled (OpenClaw removed).
+  ;; Will be re-enabled when a replacement vision backend is added.
+  (log! "vision-reacts: classification disabled; no vision backend configured")
+  [])
 
 ;; -----------------------------------------------------------------------------
 ;; Paren-safe dispatch helpers

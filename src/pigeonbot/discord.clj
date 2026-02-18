@@ -4,15 +4,17 @@
             [discljord.connections :as c]
             [discljord.events :as e]
             [discljord.messaging :as m]
+            [pigeonbot.backfill :as backfill]
             [pigeonbot.channels :as channels]
             [pigeonbot.commands :as commands]
             [pigeonbot.config :as config]
             [pigeonbot.context :as ctx]
             [pigeonbot.custom-commands :as custom]
+            [pigeonbot.db :as db]
             [pigeonbot.discljord-patch :as djpatch]
             [pigeonbot.message-reacts :as reacts]
             [pigeonbot.vision-registry :as vision-reg]
-[pigeonbot.vision-reacts :as vision-reacts]
+            [pigeonbot.vision-reacts :as vision-reacts]
             [pigeonbot.reaction-roles :as rr]
             [pigeonbot.state :refer [state]]))
 
@@ -62,6 +64,7 @@
 (defn start-bot
   "Connect to Discord and start the event pump (blocking)."
   []
+  (db/open!)
   (channels/load-channels!)
   (custom/load!)
   (reacts/load!)
@@ -113,6 +116,7 @@
 
     (reset! state {:connection conn :events event-ch :messaging msg-ch})
     (println "Connected to Discord (online)")
+    (backfill/maybe-backfill!)
     (e/message-pump! event-ch handle-event)))
 
 (defn start-bot! []
@@ -140,6 +144,7 @@
   (when-let [f @bot-future] (future-cancel f))
   (reset! bot-future nil)
   (reset! state {})
+  (db/close!)
   (println "Bot stopped."))
 
 (defn restart-bot! []
