@@ -7,7 +7,7 @@
 (def command-descriptions
   "Expose command descriptions for help/docs."
   dispatch/command-descriptions)
-
+; yay
 (defn handle-message
   "Entry point for :message-create events.
 
