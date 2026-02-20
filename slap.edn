@@ -1,0 +1,320 @@
+;; SLAP v0.1 — One Big EDN (canonical packet + strict response contract)
+;;
+;; Intent:
+;; - This file is the “set in stone” contract between:
+;;   (1) Your orchestrator (pigeonbot) and
+;;   (2) Your LLM (OpenAI/Claude/etc.)
+;;
+;; Rules:
+;; - Orchestrator sends :slap/request.
+;; - LLM MUST return :slap/response ONLY (EDN only; no prose outside EDN).
+;; - Orchestrator validates, enforces scopes/budgets, executes :query-back,
+;;   transacts accepted :extract, then either delivers :answer or recurses.
+;;
+;; Non-goals:
+;; - This does not dictate *how* Datalevin is modeled; it defines the protocol
+;;   data your system will exchange and validate.
+
+{:slap/spec
+ {:slap/version "0.1"
+
+  ;; ===========================================================================
+  ;; IDENTIFIERS + BUDGETS
+  ;; ===========================================================================
+
+  :slap/ids
+  {:packet/id        "uuid-or-ulid"          ;; unique per request/response cycle
+   :conversation/id  "uuid-or-ulid"          ;; stable for a chat thread
+   :turn/id          "uuid-or-ulid"          ;; stable per user message
+   :parent/packet-id nil}                    ;; set to previous :packet/id on recursion
+
+  :slap/budgets
+  {:max-depth        3                       ;; recursion limit (prevents loops)
+   :max-queries      12                      ;; total query-back items allowed
+   :max-tokens       6000                    ;; soft cap for LLM prompt+output
+   :max-ms           25000                   ;; optional wall-clock budget for a full SLAP run
+   :stop-on-no-new-info? true                ;; break if retrieval returns no new evidence
+   :min-delta-evidence 1}                    ;; how many new evidence items constitutes progress
+
+  ;; ===========================================================================
+  ;; LAYERS (REQUEST)
+  ;; ===========================================================================
+
+  :slap/request
+  {:slap/version "0.1"
+
+   ;; Orchestrator-controlled state
+   :packet/id       "uuid-or-ulid"
+   :conversation/id "uuid-or-ulid"
+   :turn/id         "uuid-or-ulid"
+   :depth           0                        ;; increment on each recursion
+   :budgets         {:max-depth 3 :max-queries 12 :max-tokens 6000}
+
+   ;; -------------------------
+   ;; IDENTITY LAYER
+   ;; -------------------------
+   :identity
+   {:actor
+    {:platform       :discord
+     :user/id        "discord-user-id"
+     :user/name      "Nichole"
+     :user/roles     ["admin" "…"]}
+
+    :bot
+    {:bot/name       "pigeonbot"
+     :bot/version    "git-sha-or-semver"
+     :persona/id     :pigeonbot/haunted-cozy
+     :persona/style  #{:wry :cozy :haunted :concise}
+     :persona/voice  {:typing-indicator? true}}
+
+    :scope
+    {:guild/id       "discord-guild-id"
+     :channel/id     "discord-channel-id"
+     :channel/name   "channel-name"
+     ;; Privacy enforcement rules are *orchestrator* responsibilities.
+     ;; The LLM can be told constraints, but you enforce them.
+     :privacy/scope  :channel              ;; one of #{:dm :channel :guild}
+     :privacy/rules  #{:no-cross-channel-memory
+                      :no-secrets
+                      :no-private-dms-into-public}}}
+
+   ;; -------------------------
+   ;; KNOWLEDGE LAYER
+   ;; -------------------------
+   :knowledge
+   {:pins
+    ;; High-importance, “always include” items.
+    ;; These should be short and unambiguous.
+    [{:pin/id     "pin-1"
+      :pin/text   "Never reveal secrets or private data."
+      :pin/priority 1
+      :pin/scope  :guild}]
+
+    :facts
+    ;; Stable, curated facts (not raw logs).
+    ;; You may attach provenance/evidence and confidence.
+    [{:fact/id       "fact-1"
+      :fact/text     "Pigeonbot runs as a service on the mac mini."
+      :fact/conf     0.9
+      :fact/scope    :guild
+      :fact/evidence [{:evidence/type :message
+                       :message/id    "discord-msg-id"
+                       :ts            "2026-02-07T10:09:00-06:00"}]}]
+
+    :glossary
+    [{:term "SLAP"
+      :def  "Structured LLM Access Protocol: layered request packet, strict response packet, bounded recursion, explicit query-back and extract."}]}
+
+   ;; -------------------------
+   ;; RELATIONAL LAYER
+   ;; -------------------------
+   :relational
+   {:entities
+    [{:entity/id   "user:Nichole"
+      :entity/type :user
+      :entity/name "Nichole"}
+     {:entity/id   "proj:pigeonbot"
+      :entity/type :project
+      :entity/name "pigeonbot"}]
+
+    :edges
+    [{:edge/from "user:Nichole"
+      :edge/rel  :works-on
+      :edge/to   "proj:pigeonbot"
+      :edge/conf 0.95
+      :edge/evidence [{:evidence/type :message
+                       :message/id    "discord-msg-id"
+                       :ts            "2026-02-20T15:52:00-06:00"}]}]
+
+    ;; Optional: small graph snippets precomputed by the orchestrator.
+    :graph/snippets
+    [{:snippet/id "graph-1"
+      :snippet/text "Nichole -> works-on -> pigeonbot; pigeonbot -> runs-on -> mac-mini-server."}]}
+
+   ;; -------------------------
+   ;; TEMPORAL LAYER
+   ;; -------------------------
+   :temporal
+   {:now "2026-02-20T17:00:00-06:00"
+
+    ;; Recent messages are *verbatim* ground truth.
+    ;; Keep this small to avoid token bloat.
+    :recent/messages
+    [{:message/id "discord-msg-id"
+      :ts         "2026-02-20T16:58:12-06:00"
+      :author/id  "discord-user-id"
+      :author/name "Nichole"
+      :content    "yeah I think one big edn is the way to go for setting it in stone"}]
+
+    ;; Summaries are compressed memory artifacts.
+    :summaries
+    [{:summary/id "sum-channel-2026-02-20"
+      :scope      :channel
+      :period     :day
+      :ts         "2026-02-20T23:59:59-06:00"
+      :text       "Discussion about SLAP protocol structure, recursion limits, and EDN canonical spec."}]
+
+    ;; Recent decisions (curated) to steer behavior.
+    :recent/decisions
+    [{:decision/id "dec-typing-indicator"
+      :ts          "2026-02-06T11:03:00-06:00"
+      :text        "Use Discord typing indicator instead of filler text."
+      :conf        0.95
+      :scope       :guild}]}
+
+   ;; -------------------------
+   ;; CONVERSATION LAYER
+   ;; -------------------------
+   :conversation
+   {:user/input      "yeah I think one big edn is the way to go for setting it in stone"
+    :assistant/last  nil
+    :state
+    {:goal           "Finalize canonical SLAP v0.1 EDN contract."
+     :open-questions []
+     :assumptions    []
+     :constraints    #{:edn-only-response}}}
+
+   ;; -------------------------
+   ;; TASK LAYER
+   ;; -------------------------
+   :task
+   {:task/id "task-slap-spec-v0.1"
+    :goal    "Produce the canonical SLAP v0.1 EDN contract."
+    :success/criteria
+    ["LLM response is strict EDN with defined keys"
+     "Includes ANSWER, EXTRACT, QUERY-BACK semantics"
+     "Supports bounded recursion + validation/filters"]
+    :allowed/tools
+    ;; These are symbolic capabilities; your orchestrator enforces them.
+    #{:datalevin/query :datalevin/fts :datalevin/vector}
+
+    :safety
+    {:no-cross-channel-memory? true
+     :no-secrets?              true
+     :require-evidence-for-extract? true}
+
+    ;; Optional: hint the model about desired style of the final :answer.
+    :answer/style
+    {:tone #{:cozy :concise}
+     :format :markdown}}}
+
+  ;; ===========================================================================
+  ;; RESPONSE CONTRACT (LLM OUTPUT)
+  ;; ===========================================================================
+  ;; The LLM MUST output EDN that matches :slap/response.
+  ;; The orchestrator MUST validate the response before acting on it.
+
+  :slap/response
+  {:slap/version "0.1"
+
+   ;; Must match request :packet/id
+   :packet/id "uuid-or-ulid"
+
+   ;; Whether the model believes it can answer with current evidence.
+   ;; Orchestrator may still choose to recurse if confidence is low.
+   :sufficient? true
+
+   ;; -------------------------
+   ;; ANSWER (User-facing output)
+   ;; -------------------------
+   ;; If :sufficient? is true, :answer SHOULD be non-nil.
+   ;; If :sufficient? is false, :answer MAY be nil or a partial answer with caveats.
+   :answer "string-or-nil"
+
+   ;; -------------------------
+   ;; EXTRACT (Proposed memory transactions)
+   ;; -------------------------
+   ;; The model proposes writes; orchestrator accepts/rejects based on policy.
+   :extract
+   [{:extract/id   "uuid-or-ulid"
+     :kind         :decision         ;; one of #{:decision :preference :fact :todo :lore}
+     :text         "Typing indicator is preferred over filler text."
+     :confidence   0.85              ;; 0.0–1.0
+     :scope        :guild            ;; one of #{:dm :channel :guild :user}
+     :ttl/days     nil               ;; optional TTL for ephemeral memories
+     :tags         #{:pigeonbot :ux}
+     :evidence
+     [{:evidence/type :message
+       :message/id    "discord-msg-id"
+       :ts            "2026-02-06T11:03:00-06:00"}]}]
+
+   ;; -------------------------
+   ;; QUERY-BACK (Requests for more evidence)
+   ;; -------------------------
+   ;; If :sufficient? is false, :query-back SHOULD contain one or more items.
+   :query-back
+   [{:query/id     "q1"
+     :purpose      "Find previous SLAP discussions about recursion limits and validation."
+     :tool         :datalevin/fts     ;; one of #{:datalevin/query :datalevin/fts :datalevin/vector}
+     :priority     1                 ;; lower = more important
+     :query        {:fts "SLAP max_depth recursion validate schema"}
+     :expected     {:fields [:text :ts :message/id]
+                    :limit  10}
+     :constraints {:scope :guild}}]
+
+   ;; -------------------------
+   ;; META (Debug + confidence)
+   ;; -------------------------
+   :meta
+   {:confidence 0.78
+    :notes      "If prior spec notes exist, I can align field names exactly."
+    :used       {:messages 20 :summaries 1 :facts 3 :pins 1}}}
+
+  ;; ===========================================================================
+  ;; ORCHESTRATOR ALGORITHM (NORMATIVE RULES)
+  ;; ===========================================================================
+  ;; These are the “protocol law.” Implement these in pigeonbot.
+
+  :slap/orchestrator
+  {:steps
+   [:pack-request
+    :call-llm
+    :validate-response
+    :apply-permission-filters
+    :accept-and-transact-extracts
+    :decide-sufficient?
+    :if-not-sufficient-run-queries
+    :repack-and-recurse
+    :deliver-answer]
+
+   :validate-response
+   {:must-parse-edn? true
+    :require-keys    #{:slap/version :packet/id :sufficient? :answer :extract :query-back :meta}
+    :version-must-equal "0.1"
+    :packet-id-must-match? true
+    :edn-only-output? true
+    :repair-attempts 1}
+
+   :filters
+   {:enforce-scope? true
+    :reject-cross-channel? true
+    :reject-no-evidence-extract? true
+    :reject-low-confidence-extract-threshold 0.65
+    :max-extract-per-turn 25
+    :max-query-back-per-turn 8}
+
+   :recursion
+   {:stop-conditions
+    [{:when :depth>=max-depth :action :force-answer-with-caveats}
+     {:when :queries>=max-queries :action :force-answer-with-caveats}
+     {:when :token-budget-exceeded :action :force-answer-with-caveats}
+     {:when :no-new-evidence :action :force-answer-with-caveats}
+     {:when :query-back-empty-and-insufficient :action :force-answer-with-caveats}]}
+
+   :force-answer-with-caveats
+   {:template
+    "I can answer with what I have, but I'm missing: {missing}. Based on available context: {best-effort}"}}
+
+  ;; ===========================================================================
+  ;; LLM INSTRUCTION SNIPPET (DROP-IN SYSTEM PROMPT)
+  ;; ===========================================================================
+  ;; This is the strict behavior contract for the model.
+
+  :slap/llm-instructions
+  {:system
+   ["You are a SLAP responder."
+    "You MUST output EDN only. Do not output any prose outside EDN."
+    "Your EDN MUST match the :slap/response contract for SLAP v0.1."
+    "If you need more information, set :sufficient? to false and fill :query-back with specific requests."
+    "When proposing :extract items, include evidence and a confidence score."
+    "Obey privacy scope rules; do not request or use cross-channel/private memories unless explicitly allowed in the request."]}}}
