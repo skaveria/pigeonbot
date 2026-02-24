@@ -1,8 +1,8 @@
 (ns pigeonbot.brain
   (:require [pigeonbot.config :as config]
             [pigeonbot.ollama :as ollama]
-            [pigeonbot.brains.openai :as openai]
-            [pigeonbot.brains.openclaw :as openclaw]))
+            [pigeonbot.brains.openclaw :as openclaw]
+            [pigeonbot.brains.openai :as openai]))
 
 (defn brain-type []
   (let [cfg (config/load-config)]
@@ -13,6 +13,7 @@
   [context-text question]
   (case (brain-type)
     :openai   (openai/ask-with-context context-text question)
-;    :openclaw (openclaw/ask-with-context context-text question)
-    ;; default
-    :ollama   (ollama/geof-ask-with-context context-text question)))
+    :openclaw (openclaw/ask-with-context context-text question)
+    :ollama   (ollama/geof-ask-with-context context-text question)
+    ;; Safety net: if config has a typo like :open-api, fall back instead of crashing.
+    (ollama/geof-ask-with-context context-text question)))
