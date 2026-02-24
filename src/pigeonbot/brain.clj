@@ -1,6 +1,7 @@
 (ns pigeonbot.brain
   (:require [pigeonbot.config :as config]
             [pigeonbot.ollama :as ollama]
+            [pigeonbot.brains.openai :as openai]
             [pigeonbot.brains.openclaw :as openclaw]))
 
 (defn brain-type []
