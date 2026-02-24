@@ -11,6 +11,7 @@
   "Unified brain entry point."
   [context-text question]
   (case (brain-type)
-    :openclaw (openclaw/ask-with-context context-text question)
+    :openai   (openai/ask-with-context context-text question)
+;    :openclaw (openclaw/ask-with-context context-text question)
     ;; default
     :ollama   (ollama/geof-ask-with-context context-text question)))
