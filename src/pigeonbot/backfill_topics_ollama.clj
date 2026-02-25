@@ -13,6 +13,18 @@
 (defn- endpoint [base path]
   (str (str/replace (or base "") #"/+$" "") path))
 
+(defn- sleep! [ms]
+  (when (pos? (long ms))
+    (Thread/sleep (long ms))))
+
+(defn- normalize-topics [xs]
+  (->> (or xs [])
+       (map (fn [t] (-> (str t) str/lower-case str/trim)))
+       (remove str/blank?)
+       distinct
+       (take 12)
+       vec))
+
 (defn- ollama-topics
   "Call Ollama /api/chat and return {:topics [...]}.
   Prompt is strict JSON-only."
@@ -37,22 +49,63 @@
                         :body (json/encode payload)
                         :timeout 60000})]
     (cond
-      error (throw (ex-info "Ollama request failed" {:error (str error)}))
-      (not (<= 200 status 299)) (throw (ex-info "Ollama non-2xx" {:status status :body body}))
+      error
+      (throw (ex-info "Ollama request failed" {:error (str error)}))
+
+      (not (<= 200 status 299))
+      (throw (ex-info "Ollama non-2xx" {:status status :body body}))
+
       :else
       (let [m (json->map body)
             txt (or (get-in m [:message :content])
-                    (get-in m [:messages 0 :content])
+                    ;; fallback: some older shapes
                     (get-in m [:response])
-                    ;; ollama typically uses {:message {:content ...}}
-                    (get-in m [:message :content])
-                    ;; fallback: whole body
                     (str body))
             parsed (or (json->map txt) (json->map (str/trim txt)))]
         (or parsed {:topics []})))))
 
-(defn- message-ids-in-channel
-  "Return vector of message ids for a channel (newest first)."
+(defn- topic-exists?
+  "True if a topic entity exists for message-id (uses Datalevin directly; no db helper needed)."
+  [dbv mid]
+  (boolean (ffirst (dlv/q '[:find ?e
+                            :in $ ?mid
+                            :where
+                            [?e :topic/message-id ?mid]]
+                          dbv (str mid)))))
+
+(defn- upsert-message-topics!
+  "Upsert topics for a message-id into a separate topic entity.
+
+  Uses :topic/message-id as identity (so reruns are idempotent-ish).
+  Writes topics as cardinality-many :topic/topic datoms."
+  [{:keys [message-id guild-id channel-id model topics]}]
+  (let [conn (db/ensure-conn!)
+        dbv (dlv/db conn)
+        mid (some-> message-id str)
+        topics (normalize-topics topics)]
+    (when (and (seq mid) (seq topics))
+      ;; Find existing topic entity, else use tempid
+      (let [eid (or (ffirst (dlv/q '[:find ?e
+                                     :in $ ?mid
+                                     :where
+                                     [?e :topic/message-id ?mid]]
+                                   dbv mid))
+                    (dlv/tempid :db.part/user))
+            ent {:db/id            eid
+                 :topic/message-id mid
+                 :topic/ts         (java.util.Date.)
+                 :topic/guild-id   (some-> guild-id str)
+                 :topic/channel-id (some-> channel-id str)
+                 :topic/model      (str (or model "ollama"))}
+            ;; NOTE: we *add* topics; if you want exact overwrite semantics later,
+            ;; we can retract old topics first.
+            ops (for [t topics]
+                  [:db/add eid :topic/topic t])]
+        (dlv/transact! conn (vec (concat [ent] ops)))
+        true))))
+
+(defn- message-rows-in-channel
+  "Return vector of [mid txt gid cid] for a channel."
   [channel-id]
   (let [dbv (db/db)]
     (->> (dlv/q '[:find ?mid ?txt ?gid ?cid
@@ -64,7 +117,6 @@
                   [?e :message/guild-id ?gid]
                   [?e :message/channel-id ?cid]]
                 dbv (str channel-id))
-         ;; rows are sets; keep as vector
          vec)))
 
 (defn backfill-channel-topics!
@@ -72,42 +124,43 @@
   Writes to :topic/* layer, does NOT touch spine.
 
   Options:
-  - :model (required)
+  - :model (required) e.g. \"llama3.2:latest\"
   - :ollama-url default http://localhost:11434
   - :sleep-ms default 100
   - :limit default nil
 
-  Skips messages already tagged."
+  Skips messages already tagged (by :topic/message-id existence)."
   [channel-id {:keys [model ollama-url sleep-ms limit]
                :or {sleep-ms 100}}]
   (when-not (and (string? model) (seq model))
-    (throw (ex-info "backfill-channel-topics! requires :model" {})))
+    (throw (ex-info "backfill-channel-topics! requires :model" {:model model})))
   (db/ensure-conn!)
-  (let [rows (message-ids-in-channel channel-id)
+  (let [rows (message-rows-in-channel channel-id)
         rows (if limit (take (long limit) rows) rows)]
     (loop [xs rows
-           n 0
+           seen 0
            written 0
            skipped 0]
       (if (empty? xs)
-        {:channel-id (str channel-id) :seen n :written written :skipped skipped}
+        {:channel-id (str channel-id) :seen seen :written written :skipped skipped}
         (let [[mid txt gid cid] (first xs)
-              mid (str mid)]
-          (if (db/topic-exists? mid)
-            (recur (rest xs) (inc n) written (inc skipped))
-            (let [res (ollama-topics {:ollama-url ollama-url
+              mid (str mid)
+              dbv (db/db)]
+          (if (topic-exists? dbv mid)
+            (recur (rest xs) (inc seen) written (inc skipped))
+            (let [res (ollama-topics {:ollama-url (or ollama-url default-ollama-url)
                                       :model model
                                       :text (str txt)})
-                  topics (vec (or (:topics res) []))]
+                  topics (normalize-topics (:topics res))]
               (when (seq topics)
-                (db/upsert-message-topics!
+                (upsert-message-topics!
                  {:message-id mid
                   :guild-id gid
                   :channel-id cid
                   :model (str "ollama:" model)
                   :topics topics}))
-              (when (pos? (long sleep-ms)) (Thread/sleep (long sleep-ms)))
+              (sleep! sleep-ms)
               (recur (rest xs)
-                     (inc n)
+                     (inc seen)
                      (if (seq topics) (inc written) written)
                      skipped))))))))
