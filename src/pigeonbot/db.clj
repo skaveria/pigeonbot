@@ -150,10 +150,9 @@
   (ffirst (d/q '[:find ?sha :in $ ?p :where [?e :repo/path ?p] [?e :repo/sha ?sha]]
                dbv (str path))))
 
-
 (defn repo-fulltext
-  "Full-text search over :repo/text. Returns datoms [e a v]."
-  ([query] (repo-fulltext query {}))
+  "Full-text search over :repo/text only. Returns datoms [e a v]."
+  ([query] (repo-fulltext query {:attrs [:repo/text]}))
   ([query opts]
    (d/q '[:find ?e ?a ?v
           :in $ ?q ?opts
