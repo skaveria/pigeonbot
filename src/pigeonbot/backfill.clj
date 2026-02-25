@@ -63,8 +63,6 @@
 (defn backfill-channel!
   "Backfill ALL messages for a single channel into Datalevin.
 
-  You MUST pass guild-id (so we can store it), and optionally channel-type.
-
   Options:
     :sleep-ms (default 350)
     :max-pages (default nil)
@@ -85,7 +83,7 @@
         (if (empty? msgs)
           {:channel-id (str channel-id) :pages pages :messages total}
           (do
-            ;; Inject context that Discord doesn't include in message objects.
+            ;; Inject context Discord doesn't include in each message object
             (doseq [m msgs]
               (db/upsert-message!
                (cond-> m
