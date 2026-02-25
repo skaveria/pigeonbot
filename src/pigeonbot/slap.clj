@@ -95,7 +95,7 @@
   "Render timestamps nicely. Datalevin stores instants as java.util.Date in our setup."
   [x]
   (cond
-    (instance? java.util.Date x) (.toInstant ^java.util.Date x) ;; prints like 2026-...
+    (instance? java.util.Date x) (.toString (.toInstant ^java.util.Date x))
     :else (str x)))
 
 (defn- slap-system-instructions []
@@ -111,7 +111,8 @@
    "- :meta must be a map (possibly empty)."
    ""
    "Evidence usage:"
-   "- You may be given :knowledge {:evidence [...]}, containing chat messages from Datalevin."
+   "- You will be given :knowledge {:evidence [...]}, containing chat messages."
+   "- Those messages are scoped to the current channel; do not invent cross-channel context."
    "- Prefer grounding your answer in those messages."
    "- If evidence is missing or insufficient, set :sufficient? false and request :query-back."
    ""
@@ -149,7 +150,6 @@
       (throw (ex-info "SLAP: missing key" {:missing k :resp resp}))))
   (when-not (vector? (:extract resp))
     (throw (ex-info "SLAP: :extract must be vector" {:extract (:extract resp)})))
-  ;; tolerate nil from model but normalize later; still warn via validation error if you want strict:
   (when-not (or (nil? (:query-back resp)) (vector? (:query-back resp)))
     (throw (ex-info "SLAP: :query-back must be vector or nil" {:query-back (:query-back resp)})))
   (when-not (map? (:meta resp))
@@ -165,20 +165,11 @@
      :persona/id (or (:persona-id cfg) :pigeonbot/haunted-cozy)
      :persona/style (or (:persona-style cfg) #{:cozy :wry :haunted :concise})
      :persona/voice {:typing-indicator? true}
-     ;; Optional: you can set this to your Gef/pigeonbot voice prompt
      :persona/prompt (:persona-prompt cfg)}))
 
-(defn- scope-match?
-  "Keep evidence scoped. Prefer guild scope if msg has guild-id, otherwise channel scope."
-  [msg m]
-  (let [gid (some-> (:guild-id msg) str)
-        cid (some-> (:channel-id msg) str)
-        mgid (some-> (:message/guild-id m) str)
-        mcid (some-> (:message/channel-id m) str)]
-    (cond
-      (seq gid) (= gid mgid)
-      (seq cid) (= cid mcid)
-      :else true)))
+;; -----------------------------------------------------------------------------
+;; Datalevin utilities (Mode A: channel-first scoping)
+;; -----------------------------------------------------------------------------
 
 (defn- pull-message
   "Pull a compact message map by eid."
@@ -196,54 +187,46 @@
               eid)
     (catch Throwable _ nil)))
 
+(defn- same-channel?
+  "Mode A: only same channel counts as 'in scope'."
+  [msg m]
+  (let [cid (some-> (:channel-id msg) str)
+        mcid (some-> (:message/channel-id m) str)]
+    (if (seq cid)
+      (= cid mcid)
+      true)))
+
 (defn- recent-messages-from-db
-  "Fetch last N messages in this scope from Datalevin for temporal context."
+  "Fetch last N messages from the SAME CHANNEL for temporal context (Mode A)."
   [msg n]
   (let [dbv (db/db)
-        gid (some-> (:guild-id msg) str)
-        cid (some-> (:channel-id msg) str)
-        rows (cond
-               (seq gid)
-               (dlv/q '[:find ?ts ?author ?txt ?mid ?chid
-                        :in $ ?gid
-                        :where
-                        [?e :message/guild-id ?gid]
-                        [?e :message/ts ?ts]
-                        [?e :message/author-name ?author]
-                        [?e :message/content ?txt]
-                        [?e :message/id ?mid]
-                        [?e :message/channel-id ?chid]]
-                      dbv gid)
-
-               (seq cid)
-               (dlv/q '[:find ?ts ?author ?txt ?mid
-                        :in $ ?cid
-                        :where
-                        [?e :message/channel-id ?cid]
-                        [?e :message/ts ?ts]
-                        [?e :message/author-name ?author]
-                        [?e :message/content ?txt]
-                        [?e :message/id ?mid]]
-                      dbv cid)
-
-               :else [])]
-    (->> rows
-         (sort-by first)
-         (take-last (long n))
-         (map (fn [row]
-                (let [[ts author txt mid chid] row]
-                  (cond-> {:message/id (str mid)
-                           :ts (str (iso-or-str ts))
-                           :author/name (str author)
-                           :content (str txt)}
-                    chid (assoc :channel/id (str chid))))))
-         vec)))
+        cid (some-> (:channel-id msg) str)]
+    (if-not (seq cid)
+      []
+      (let [rows (dlv/q '[:find ?ts ?author ?txt ?mid
+                          :in $ ?cid
+                          :where
+                          [?e :message/channel-id ?cid]
+                          [?e :message/ts ?ts]
+                          [?e :message/author-name ?author]
+                          [?e :message/content ?txt]
+                          [?e :message/id ?mid]]
+                        dbv cid)]
+        (->> rows
+             (sort-by first)
+             (take-last (long n))
+             (map (fn [[ts author txt mid]]
+                    {:message/id (str mid)
+                     :ts (str (iso-or-str ts))
+                     :author/name (str author)
+                     :content (str txt)}))
+             vec)))))
 
 (defn- preseed-evidence
-  "Initial 'slap spice' from Datalevin.
+  "Initial 'slap spice' from Datalevin (Mode A).
   - Run FTS on the question
   - Pull top N messages
-  - Filter to same guild/channel scope"
+  - FILTER to same channel only"
   [msg question]
   (let [cfg (config/load-config)
         limit (long (or (:slap-preseed-limit cfg) 25))
@@ -256,14 +239,18 @@
             rows (->> eids
                       (map (fn [eid] (pull-message dbv eid)))
                       (remove nil?)
-                      (filter (partial scope-match? msg))
+                      (filter (partial same-channel? msg))
                       vec)]
         (if (seq rows)
           [{:evidence/type :datalevin/preseed
-            :purpose "Top relevant chat messages from Datalevin for the current question."
+            :purpose "Top relevant chat messages from Datalevin for the current question (same channel)."
             :fts q
             :rows rows}]
           [])))))
+
+;; -----------------------------------------------------------------------------
+;; Packet builder (Mode A temporal + persona)
+;; -----------------------------------------------------------------------------
 
 (defn- build-request
   [{:keys [packet-id conversation-id depth msg evidence]}]
@@ -279,16 +266,12 @@
      :packet/id packet-id
      :conversation/id (or conversation-id packet-id)
      :depth depth
-
-     ;; Identity layer includes both actor and bot persona
      :identity {:actor {:platform :discord
                         :user/id author-id
                         :user/name author-name}
                 :bot (bot-persona)
                 :scope {:guild/id (some-> guild-id str)
                         :channel/id (some-> channel-id str)}}
-
-     ;; Temporal is now richer + explicit
      :temporal {:now (now-iso)
                 :recent/messages [{:message/id (some-> id str)
                                    :ts (now-iso)
@@ -297,12 +280,15 @@
                                    :content (str (or content ""))}]
                 :recent/context recent-context
                 :recent/datalevin recent-db}
-
      :knowledge {:evidence (vec evidence)}
      :task {:goal "Answer the user's message using available evidence. If insufficient, request query-back."}}))
 
+;; -----------------------------------------------------------------------------
+;; Query-back tool: :datalevin/fts (Mode A scoping)
+;; -----------------------------------------------------------------------------
+
 (defn- fts-evidence
-  "Execute a single :datalevin/fts query-back item."
+  "Execute a single :datalevin/fts query-back item (Mode A: same channel only)."
   [msg item]
   (let [qid (or (:query/id item) (new-id))
         purpose (or (:purpose item) "")
@@ -314,7 +300,7 @@
         rows (->> eids
                   (map (fn [eid] (pull-message dbv eid)))
                   (remove nil?)
-                  (filter (partial scope-match? msg))
+                  (filter (partial same-channel? msg))
                   vec)]
     {:evidence/type :datalevin/fts
      :query/id qid
@@ -373,7 +359,6 @@
                                  :evidence evidence})
              raw (openai-edn! (slap-system-instructions) (pr-str req))
              resp (-> raw safe-edn-read (validate-response! packet-id))
-             ;; normalize query-back to a vector even if model returns nil
              qb (vec (or (:query-back resp) []))
              resp (assoc resp :query-back qb)
              sufficient? (true? (:sufficient? resp))]
