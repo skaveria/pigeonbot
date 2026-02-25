@@ -312,7 +312,7 @@
                   (take 12)
                   vec)]
     tags))
-
+;;slap working 
 
 (defn- related-extract-evidence
   "Pull extracts in this channel matched by tag overlap.
