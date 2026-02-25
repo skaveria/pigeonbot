@@ -97,12 +97,20 @@
    "Output MUST be a single EDN map with keys:"
    "  :slap/version :packet/id :sufficient? :answer :extract :query-back :meta"
    "Use :slap/version \"0.1\"."
-   "If insufficient, set :sufficient? false and include :query-back items."
-   "For :query-back, ONLY use tool :datalevin/fts."
-   "Each query-back item should look like:"
+   ""
+   "Evidence:"
+   "- You may be given :knowledge {:evidence [...]}, containing chat messages."
+   "- Prefer grounding your answer in those messages."
+   "- If evidence is missing or insufficient, set :sufficient? false and request :query-back."
+   ""
+   "Query-back:"
+   "- ONLY use tool :datalevin/fts."
+   "- Each query-back item should look like:"
    "{:query/id \"q1\" :tool :datalevin/fts :query {:fts \"...\"} :expected {:limit 10} :purpose \"...\" :priority 1}"
-   "Keep :answer concise. No markdown unless asked."
-   "Never include secrets."])
+   ""
+   "Style:"
+   "- Keep :answer concise (1-3 sentences unless asked for more)."
+   "- Never include secrets."])
 
 (defn- safe-edn-read [s]
   (try
@@ -155,7 +163,7 @@
      :task {:goal "Answer the user's message using available evidence. If insufficient, request query-back."}}))
 
 ;; -----------------------------------------------------------------------------
-;; Datalevin query tool: :datalevin/fts
+;; Datalevin utilities
 ;; -----------------------------------------------------------------------------
 
 (defn- pull-message
@@ -174,19 +182,63 @@
               eid)
     (catch Throwable _ nil)))
 
+(defn- scope-match?
+  "Keep evidence scoped. Prefer guild scope if msg has guild-id, otherwise channel scope."
+  [msg m]
+  (let [gid (some-> (:guild-id msg) str)
+        cid (some-> (:channel-id msg) str)
+        mgid (some-> (:message/guild-id m) str)
+        mcid (some-> (:message/channel-id m) str)]
+    (cond
+      (seq gid) (= gid mgid)
+      (seq cid) (= cid mcid)
+      :else true)))
+
+(defn- preseed-evidence
+  "Initial 'slap spice' from Datalevin.
+  - Run FTS on the question
+  - Pull top N messages
+  - Filter to same guild/channel scope"
+  [msg question]
+  (let [cfg (config/load-config)
+        ;; tuning knobs (safe defaults)
+        limit (long (or (:slap-preseed-limit cfg) 25))
+        q (-> (or question "") str str/trim)]
+    (if (str/blank? q)
+      []
+      (let [hits (take limit (db/fulltext q))
+            eids (->> hits (map first) distinct vec)
+            dbv (db/db)
+            rows (->> eids
+                      (map (fn [eid] (pull-message dbv eid)))
+                      (remove nil?)
+                      (filter (partial scope-match? msg))
+                      vec)]
+        (if (seq rows)
+          [{:evidence/type :datalevin/preseed
+            :purpose "Top relevant chat messages from Datalevin for the current question."
+            :fts q
+            :rows rows}]
+          [])))))
+
+;; -----------------------------------------------------------------------------
+;; Query-back tool: :datalevin/fts
+;; -----------------------------------------------------------------------------
+
 (defn- fts-evidence
   "Execute a single :datalevin/fts query-back item."
-  [item]
+  [msg item]
   (let [qid (or (:query/id item) (new-id))
         purpose (or (:purpose item) "")
         q (or (get-in item [:query :fts]) "")
-        limit (or (get-in item [:expected :limit]) 10)
+        limit (long (or (get-in item [:expected :limit]) 10))
         hits (take limit (db/fulltext q))
         eids (->> hits (map first) distinct vec)
         dbv (db/db)
         rows (->> eids
                   (map (fn [eid] (pull-message dbv eid)))
                   (remove nil?)
+                  (filter (partial scope-match? msg))
                   vec)]
     {:evidence/type :datalevin/fts
      :query/id qid
@@ -196,13 +248,13 @@
 
 (defn- run-query-back
   "Execute :query-back items. Returns vector of evidence maps."
-  [query-back]
+  [msg query-back]
   (->> (or query-back [])
        (sort-by (fn [q] (or (:priority q) 999)))
        (mapcat
         (fn [q]
           (case (:tool q)
-            :datalevin/fts [(fts-evidence q)]
+            :datalevin/fts [(fts-evidence msg q)]
             [])))
        vec))
 
@@ -218,9 +270,12 @@
          :or {max-depth 3 max-queries 8}}]
    (db/ensure-conn!)
    (let [packet-id (new-id)
-         conversation-id (new-id)]
+         conversation-id (new-id)
+         question (str (or (:content msg) ""))  ;; for preseed
+         ;; The spice: seed evidence from Datalevin BEFORE first OpenAI call.
+         seed (preseed-evidence msg question)]
      (loop [depth 0
-            evidence []
+            evidence (vec seed)
             queries-used 0]
        (let [req (build-request {:packet-id packet-id
                                  :conversation-id conversation-id
@@ -245,7 +300,7 @@
            {:answer (str (:answer resp)) :resp resp :depth depth}
 
            :else
-           (let [new-evidence (run-query-back qb)]
+           (let [new-evidence (run-query-back msg qb)]
              (if (empty? new-evidence)
                {:answer (str (:answer resp)) :resp resp :depth depth}
                (recur (inc depth)
