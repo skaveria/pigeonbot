@@ -78,19 +78,12 @@
    ;; -------------------------
 ;; REPO: indexed source files (repo-only)
 ;; -------------------------
-:repo/path   {:db/unique :db.unique/identity
-              :db/valueType :db.type/string
-              :db/index true}
-:repo/sha    {:db/valueType :db.type/string
-              :db/index true}
-:repo/ts     {:db/valueType :db.type/instant
-              :db/index true}
-:repo/bytes  {:db/valueType :db.type/long
-              :db/index true}
-:repo/kind   {:db/valueType :db.type/keyword
-              :db/index true}
-:repo/text   {:db/valueType :db.type/string
-              :db/fulltext true}
+:repo/path   {:db/unique :db.unique/identity :db/valueType :db.type/string :db/index true}
+:repo/sha    {:db/valueType :db.type/string :db/index true}
+:repo/ts     {:db/valueType :db.type/instant :db/index true}
+:repo/bytes  {:db/valueType :db.type/long :db/index true}
+:repo/kind   {:db/valueType :db.type/keyword :db/index true}
+:repo/text   {:db/valueType :db.type/string :db/fulltext true}
    ;; -------------------------
    ;; TOPICS: per-message topic tags (separate from spine)
    ;; -------------------------
