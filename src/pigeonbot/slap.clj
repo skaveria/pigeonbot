@@ -75,8 +75,10 @@
     (cond
       error
       (throw (ex-info "OpenAI request failed" {:error (str error) :endpoint ep}))
+
       (or (nil? status) (not (<= 200 status 299)))
       (throw (ex-info "OpenAI returned non-2xx" {:status status :body body :endpoint ep}))
+
       :else
       (-> (extract-output-text body) str str/trim))))
 
@@ -105,7 +107,7 @@
    ""
    "IMPORTANT OUTPUT SHAPE:"
    "- :extract must be a vector (possibly empty)."
-   "- Each extract item should be either:"
+   "- Each extract item must be either:"
    "  - a string, OR"
    "  - a map with at least {:text \"...\"}."
    "- If you output an extract MAP, it MUST include:"
@@ -139,7 +141,7 @@
    "- Never include secrets."])
 
 (defn- persona-instructions
-  "Promote pigeonbot persona into system-level steering so the sass sticks."
+  "Promote persona into system-level steering so the sass sticks."
   []
   (let [cfg (config/load-config)
         p (some-> (:persona-prompt cfg) str str/trim)]
@@ -149,7 +151,7 @@
              "PERSONA (obey this voice guide):"
              p
              ""
-             "Style reminder: be playful, sassy pigeon entity; concise; avoid generic assistant tone."]))))
+             "Style reminder: playful, sassy pigeon entity; concise; avoid generic assistant tone."]))))
 
 (defn- safe-edn-read [s]
   (try
@@ -166,8 +168,7 @@
   (when-not (= "0.1" (:slap/version resp))
     (throw (ex-info "SLAP: wrong version" {:got (:slap/version resp)})))
   (when-not (= packet-id (:packet/id resp))
-    (throw (ex-info "SLAP: packet id mismatch"
-                    {:expected packet-id :got (:packet/id resp)})))
+    (throw (ex-info "SLAP: packet id mismatch" {:expected packet-id :got (:packet/id resp)})))
   (doseq [k [:sufficient? :answer :extract :query-back :meta]]
     (when-not (contains? resp k)
       (throw (ex-info "SLAP: missing key" {:missing k :resp resp}))))
@@ -191,7 +192,7 @@
      :persona/prompt (:persona-prompt cfg)}))
 
 ;; -----------------------------------------------------------------------------
-;; Datalevin utilities (Mode A: channel-first scoping)
+;; Mode A scoping helpers
 ;; -----------------------------------------------------------------------------
 
 (defn- pull-message
@@ -211,16 +212,18 @@
     (catch Throwable _ nil)))
 
 (defn- same-channel?
-  "Mode A: only same channel counts as 'in scope'."
+  "Mode A: only same channel counts as in-scope."
   [msg m]
   (let [cid (some-> (:channel-id msg) str)
         mcid (some-> (:message/channel-id m) str)]
-    (if (seq cid)
-      (= cid mcid)
-      true)))
+    (if (seq cid) (= cid mcid) true)))
+
+;; -----------------------------------------------------------------------------
+;; Temporal and evidence sources (Mode A)
+;; -----------------------------------------------------------------------------
 
 (defn- recent-messages-from-db
-  "Fetch last N messages from the SAME CHANNEL for temporal context (Mode A)."
+  "Fetch last N messages from the SAME CHANNEL for temporal context."
   [msg n]
   (let [dbv (db/db)
         cid (some-> (:channel-id msg) str)]
@@ -246,10 +249,7 @@
              vec)))))
 
 (defn- preseed-evidence
-  "Initial 'slap spice' from Datalevin (Mode A).
-  - Run FTS on the question
-  - Pull top N messages
-  - FILTER to same channel only"
+  "Initial evidence from Datalevin fulltext, filtered to same channel."
   [msg question]
   (let [cfg (config/load-config)
         limit (long (or (:slap-preseed-limit cfg) 25))
@@ -272,11 +272,7 @@
           [])))))
 
 ;; -----------------------------------------------------------------------------
-;; Related extracts by tag overlap (Mode A, same channel) -- FIXED QUERY
-;; -----------------------------------------------------------------------------
-
-;; -----------------------------------------------------------------------------
-;; Related extracts by tag overlap (Mode A, same channel) -- uses :extract/tag
+;; B) Related extracts by tag overlap (Mode A, same channel) -- CORRECT :extract/tag
 ;; -----------------------------------------------------------------------------
 
 (def ^:private stopwords
@@ -301,8 +297,8 @@
     tags))
 
 (defn- related-extract-evidence
-  "Pull recent extracts in this channel that overlap tags derived from the question.
-  IMPORTANT: This uses :extract/tag (singular) as cardinality-many."
+  "Pull extracts in this channel matched by tag overlap.
+  IMPORTANT: Uses :extract/tag (singular, cardinality-many)."
   [msg question]
   (let [cfg (config/load-config)
         cid (some-> (:channel-id msg) str)
@@ -311,8 +307,7 @@
     (if (or (not (seq cid)) (empty? tags))
       []
       (let [dbv (db/db)
-            ;; Join directly on the candidate tags:
-            ;; rows = [eid ts txt kind conf matched-tag]
+            ;; Join on candidate tags directly: [?tag ...]
             rows (dlv/q '[:find ?eid ?ts ?txt ?kind ?conf ?tag
                           :in $ ?cid [?tag ...]
                           :where
@@ -349,9 +344,8 @@
             :rows grouped}]
           [])))))
 
-
 ;; -----------------------------------------------------------------------------
-;; Packet builder (Mode A temporal + persona)
+;; Packet builder
 ;; -----------------------------------------------------------------------------
 
 (defn- build-request
@@ -386,11 +380,11 @@
      :task {:goal "Answer the user's message using available evidence. If insufficient, request query-back."}}))
 
 ;; -----------------------------------------------------------------------------
-;; Query-back tool: :datalevin/fts (Mode A scoping)
+;; Query-back tool: :datalevin/fts (Mode A)
 ;; -----------------------------------------------------------------------------
 
 (defn- fts-evidence
-  "Execute a single :datalevin/fts query-back item (Mode A: same channel only)."
+  "Execute a single :datalevin/fts query-back item (same channel only)."
   [msg item]
   (let [qid (or (:query/id item) (new-id))
         purpose (or (:purpose item) "")
@@ -423,13 +417,10 @@
        vec))
 
 ;; -----------------------------------------------------------------------------
-;; Extract normalization (so db/upsert-extracts! always sees :text or strings)
+;; Extract normalization (so db/upsert-extracts! always sees strings or {:text ...})
 ;; -----------------------------------------------------------------------------
 
 (defn- normalize-extract-item
-  "Coerce model extract items into either:
-  - string
-  - {:text \"...\" ...} map"
   [x]
   (cond
     (nil? x) nil
@@ -445,10 +436,7 @@
           conf (double (or (:confidence x) (:extract/confidence x) 0.75))
           tags (or (:tags x) (:extract/tags x) [])]
       (when (seq txt)
-        {:text txt
-         :kind kind
-         :confidence conf
-         :tags tags}))
+        {:text txt :kind kind :confidence conf :tags tags}))
 
     :else nil))
 
