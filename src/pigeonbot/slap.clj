@@ -75,10 +75,8 @@
     (cond
       error
       (throw (ex-info "OpenAI request failed" {:error (str error) :endpoint ep}))
-
       (or (nil? status) (not (<= 200 status 299)))
       (throw (ex-info "OpenAI returned non-2xx" {:status status :body body :endpoint ep}))
-
       :else
       (-> (extract-output-text body) str str/trim))))
 
@@ -274,7 +272,7 @@
           [])))))
 
 ;; -----------------------------------------------------------------------------
-;; NEW (B): related extracts by tag overlap (Mode A, same channel)
+;; Related extracts by tag overlap (Mode A, same channel) -- FIXED QUERY
 ;; -----------------------------------------------------------------------------
 
 (def ^:private stopwords
@@ -284,11 +282,9 @@
     "saying" "said" "talking" "discuss" "discussion" "summarize" "quick" "test"})
 
 (defn- candidate-tags-from-question
-  "Turn user question into a small set of tags we can match against :extract/tags.
-  Deterministic; no extra model calls."
+  "Deterministic tags from question to match against :extract/tags."
   [s]
   (let [s (-> (or s "") str/lower-case)
-        ;; model-ish tokens like 93r, m4a4, g19, 1913, mcx/mpx, etc.
         modelish (re-seq #"\b[a-z]{1,4}\d{1,4}[a-z]?\b" s)
         words (->> (re-seq #"[a-z]{3,}" s)
                    (remove stopwords))
@@ -301,7 +297,8 @@
     tags))
 
 (defn- related-extract-evidence
-  "Pull recent extracts in this channel that overlap tags derived from question."
+  "Pull recent extracts in this channel with tag overlap derived from question.
+  FIX: Use a join on :extract/tags with :in [$ ?cid [?tag ...]]."
   [msg question]
   (let [cfg (config/load-config)
         cid (some-> (:channel-id msg) str)
@@ -310,19 +307,17 @@
     (if (or (not (seq cid)) (empty? tags))
       []
       (let [dbv (db/db)
-            ;; query returns multiple rows per extract (one per matching tag)
+            ;; rows: [eid ts txt kind conf matched-tag]
             rows (dlv/q '[:find ?eid ?ts ?txt ?kind ?conf ?tag
-                          :in $ ?cid [?tags ...]
+                          :in $ ?cid [?tag ...]
                           :where
                           [?eid :extract/channel-id ?cid]
                           [?eid :extract/ts ?ts]
                           [?eid :extract/text ?txt]
                           [?eid :extract/kind ?kind]
                           [?eid :extract/confidence ?conf]
-                          [?eid :extract/tags ?tag]
-                          [(contains? (set ?tags) ?tag)]]
+                          [?eid :extract/tags ?tag]]
                         dbv cid tags)
-            ;; group by extract entity id, count overlaps, keep newest ts
             grouped (->> rows
                          (group-by first)
                          (map (fn [[eid rs]]
@@ -338,8 +333,7 @@
                                    :extract/confidence conf
                                    :extract/matched-tags matched
                                    :extract/overlap (count matched)})))
-                         ;; rank: overlap desc, ts desc
-                         (sort-by (fn [m] [(- (:extract/overlap m)) (:extract/ts m)]) )
+                         (sort-by (fn [m] [(- (:extract/overlap m)) (:extract/ts m)]))
                          (take limit)
                          vec)]
         (if (seq grouped)
@@ -463,13 +457,12 @@
 ;; -----------------------------------------------------------------------------
 
 (defn build-first-packet
-  "REPL helper: show the exact first request packet (with preseed + temporal)."
+  "REPL helper: show the exact first request packet (with evidence seed)."
   [msg]
   (db/ensure-conn!)
   (let [packet-id (new-id)
         conversation-id (new-id)
         question (str (or (:content msg) ""))
-        ;; seed includes: preseed messages + related extracts (B)
         seed (vec (concat (preseed-evidence msg question)
                           (related-extract-evidence msg question)))]
     (build-request {:packet-id packet-id
@@ -489,7 +482,6 @@
          packet-id (new-id)
          conversation-id (new-id)
          question (str (or (:content msg) ""))
-         ;; seed includes: preseed messages + related extracts (B)
          seed (vec (concat (preseed-evidence msg question)
                            (related-extract-evidence msg question)))
          write-ctx {:guild-id (:guild-id msg)
