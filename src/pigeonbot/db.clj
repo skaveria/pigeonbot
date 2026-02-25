@@ -45,7 +45,7 @@
   (d/db (ensure-conn!)))
 
 (defn- parse-instant
-  "Discord gives ISO8601 timestamps. java.time.Instant/parse handles them."
+  "Discord gives ISO8601 timestamps."
   [s]
   (when (and (string? s) (seq s))
     (try
@@ -66,12 +66,18 @@
      :author-id   (some-> author-id str)
      :bot?        bot?}))
 
+(defn- drop-nils
+  "Datalevin cannot store nil attribute values; remove them."
+  [m]
+  (into {} (remove (comp nil? val)) m))
+
 (defn message->tx
   "Convert a Discord message payload into a Datalevin entity map.
 
-  Datalevin note:
+  Datalevin notes:
   - Do NOT use lookup refs like [:message/id \"...\"] as :db/id inside map tx.
-  - Use a tempid and rely on :message/id being unique identity for upsert."
+  - Use a tempid and rely on :message/id being unique identity for upsert.
+  - Do not include nil values."
   [{:keys [id timestamp guild-id channel-id channel-type content] :as msg}]
   (let [{:keys [author-name author-id bot?]} (normalize-author msg)
         mid (some-> id str)
@@ -81,16 +87,17 @@
                     (str/replace #"\u0000" "")
                     (str/trim))]
     (when (seq mid)
-      {:db/id               (d/tempid :db.part/user)
-       :message/id          mid
-       :message/ts          ts
-       :message/guild-id    (some-> guild-id str)
-       :message/channel-id  (some-> channel-id str)
-       :message/channel-type (when channel-type (long channel-type))
-       :message/author-id   (or author-id "")
-       :message/author-name author-name
-       :message/bot?        bot?
-       :message/content     content})))
+      (drop-nils
+       {:db/id               (d/tempid :db.part/user)
+        :message/id          mid
+        :message/ts          ts
+        :message/guild-id    (some-> guild-id str)
+        :message/channel-id  (some-> channel-id str)
+        :message/channel-type (when channel-type (long channel-type))
+        :message/author-id   (or author-id "")
+        :message/author-name author-name
+        :message/bot?        bot?
+        :message/content     content}))))
 
 (defn upsert-message!
   "Idempotently store a message in Datalevin (by :message/id)."

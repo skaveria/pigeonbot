@@ -1,6 +1,5 @@
 (ns pigeonbot.backfill
-  (:require [clojure.string :as str]
-            [org.httpkit.client :as http]
+  (:require [org.httpkit.client :as http]
             [cheshire.core :as json]
             [pigeonbot.config :as config]
             [pigeonbot.db :as db]))
@@ -12,7 +11,6 @@
     (or (:token cfg) (config/discord-token))))
 
 (defn- auth-header [token]
-  ;; Discord bot auth header uses "Bot <token>"
   {"Authorization" (str "Bot " token)
    "Content-Type" "application/json"})
 
@@ -39,7 +37,8 @@
               ms (long (+ (* 1000.0 (double retry)) 250))]
           (if (< attempt 10)
             (do (sleep-ms ms) (recur (inc attempt)))
-            (throw (ex-info "Discord rate limit retry exceeded" {:url url :status status :body body}))))
+            (throw (ex-info "Discord rate limit retry exceeded"
+                            {:url url :status status :body body}))))
 
         (not (<= 200 status 299))
         (throw (ex-info "Discord GET non-2xx" {:url url :status status :body body}))
@@ -48,15 +47,12 @@
         (if (string? body) (decode body) body)))))
 
 (defn fetch-guild-channels
-  "Return vector of channel maps for a guild."
   [guild-id]
   (let [token (bot-token)
         url (str api-base "/guilds/" (str guild-id) "/channels")]
     (vec (http-get-json url (auth-header token)))))
 
 (defn fetch-channel-messages
-  "Fetch up to 100 messages (newest->oldest) from a channel.
-  If before-id provided, fetch messages before that message id."
   [channel-id before-id]
   (let [token (bot-token)
         q (cond-> "limit=100"
@@ -67,13 +63,15 @@
 (defn backfill-channel!
   "Backfill ALL messages for a single channel into Datalevin.
 
+  You MUST pass guild-id (so we can store it), and optionally channel-type.
+
   Options:
-    :sleep-ms (default 350) - polite delay between pages
-    :max-pages (default nil) - limit for testing
+    :sleep-ms (default 350)
+    :max-pages (default nil)
 
   Returns {:channel-id .. :pages .. :messages ..}"
-  [channel-id & {:keys [sleep-ms max-pages]
-                 :or {sleep-ms 350}}]
+  [guild-id channel-id & {:keys [sleep-ms max-pages channel-type]
+                          :or {sleep-ms 350}}]
   (db/ensure-conn!)
   (loop [before nil
          pages 0
@@ -87,22 +85,26 @@
         (if (empty? msgs)
           {:channel-id (str channel-id) :pages pages :messages total}
           (do
-            ;; Ingest newest->oldest page
-            (doseq [m msgs] (db/upsert-message! m))
+            ;; Inject context that Discord doesn't include in message objects.
+            (doseq [m msgs]
+              (db/upsert-message!
+               (cond-> m
+                 true (assoc :channel-id (str channel-id)
+                             :guild-id (str guild-id))
+                 channel-type (assoc :channel-type (long channel-type)))))
+
             (sleep-ms sleep-ms)
-            ;; Continue from the oldest message in this page
+
             (let [last-id (some-> (last msgs) :id str)]
               (recur last-id (inc pages) (+ total (count msgs))))))))))
 
 (defn- guild-textish-channel?
-  "Include normal text + announcement channels by default.
-  Discord types: 0 = GUILD_TEXT, 5 = GUILD_ANNOUNCEMENT."
+  "0 = GUILD_TEXT, 5 = GUILD_ANNOUNCEMENT"
   [{:keys [type]}]
   (contains? #{0 5} type))
 
 (defn backfill-guild!
-  "Backfill ALL messages for ALL textish channels in a guild.
-  Returns {:guild-id .. :channels [{:channel-id .. :pages .. :messages ..} ...]}."
+  "Backfill ALL messages for ALL textish channels in a guild."
   [guild-id & {:keys [sleep-ms]
                :or {sleep-ms 350}}]
   (let [chs (->> (fetch-guild-channels (str guild-id))
@@ -113,9 +115,12 @@
     (reduce
       (fn [acc ch]
         (let [cid (str (:id ch))
-              nm  (or (:name ch) "")]
+              nm  (or (:name ch) "")
+              ctype (:type ch)]
           (println "Backfilling channel" cid nm)
-          (let [res (backfill-channel! cid :sleep-ms sleep-ms)]
+          (let [res (backfill-channel! (str guild-id) cid
+                                       :sleep-ms sleep-ms
+                                       :channel-type ctype)]
             (update acc :channels conj res))))
       {:guild-id (str guild-id)
        :channels []}
