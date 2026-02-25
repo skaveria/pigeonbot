@@ -75,6 +75,22 @@
    :extract/tags          {:db/valueType :db.type/string  :db/index true}
 
    ;; -------------------------
+;; REPO: indexed source files (repo-only)
+;; -------------------------
+:repo/path   {:db/unique :db.unique/identity
+              :db/valueType :db.type/string
+              :db/index true}
+:repo/sha    {:db/valueType :db.type/string
+              :db/index true}
+:repo/ts     {:db/valueType :db.type/instant
+              :db/index true}
+:repo/bytes  {:db/valueType :db.type/long
+              :db/index true}
+:repo/kind   {:db/valueType :db.type/keyword
+              :db/index true}
+:repo/text   {:db/valueType :db.type/string
+              :db/fulltext true}
+   ;; -------------------------
    ;; TOPICS: per-message topic tags (separate from spine)
    ;; -------------------------
    :topic/message-id      {:db/unique :db.unique/identity
@@ -125,8 +141,64 @@
 (defn- drop-nils [m]
   (into {} (remove (comp nil? val)) m))
 
+
 (defn- now-date [] (java.util.Date.))
 
+(defn- repo-eid-by-path
+  "Return eid for a repo file by path, or nil."
+  [dbv path]
+  (ffirst (d/q '[:find ?e :in $ ?p :where [?e :repo/path ?p]]
+               dbv (str path))))
+
+(defn- repo-sha-by-path
+  "Return sha for a repo file by path, or nil."
+  [dbv path]
+  (ffirst (d/q '[:find ?sha :in $ ?p :where [?e :repo/path ?p] [?e :repo/sha ?sha]]
+               dbv (str path))))
+
+(defn upsert-repo-file!
+  "Upsert a repo file entity by :repo/path.
+  Returns true if inserted/updated, false if unchanged (sha match)."
+  [{:keys [repo/path repo/text repo/sha repo/bytes repo/kind]
+    :as m}]
+  (let [conn (ensure-conn!)
+        dbv (d/db conn)
+        path (some-> repo/path str)
+        text (some-> repo/text str)
+        sha  (some-> repo/sha str)]
+    (when (and (seq path) (seq text) (seq sha))
+      (let [old (repo-sha-by-path dbv path)]
+        (if (= old sha)
+          false
+          (let [eid (or (repo-eid-by-path dbv path) (d/tempid :db.part/user))
+                ent (drop-nils
+                     {:db/id      eid
+                      :repo/path  path
+                      :repo/sha   sha
+                      :repo/ts    (now-date)
+                      :repo/bytes (long (or repo/bytes (count text)))
+                      :repo/kind  (or repo/kind :txt)
+                      :repo/text  text})]
+            (d/transact! conn [ent])
+            true))))))
+
+(defn repo-fulltext
+  "Full-text search over :repo/text. Returns datoms [e a v]."
+  ([query] (repo-fulltext query {}))
+  ([query opts]
+   (d/q '[:find ?e ?a ?v
+          :in $ ?q ?opts
+          :where [(fulltext $ ?q ?opts) [[?e ?a ?v]]]]
+        (db) query opts)))
+
+(defn pull-repo-file
+  "Pull basic repo file fields by eid."
+  [dbv eid]
+  (try
+    (d/pull dbv
+            [:repo/path :repo/sha :repo/ts :repo/bytes :repo/kind :repo/text]
+            eid)
+    (catch Throwable _ nil)))
 ;; -----------------------------------------------------------------------------
 ;; SPINE writes
 ;; -----------------------------------------------------------------------------
