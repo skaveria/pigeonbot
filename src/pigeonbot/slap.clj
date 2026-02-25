@@ -106,26 +106,26 @@
    "Use :slap/version \"0.1\"."
    ""
    "IMPORTANT OUTPUT SHAPE:"
-"- :extract must be a vector (possibly empty)."
-"- Each extract item should be either:"
-"  - a string, OR"
-"  - a map with at least {:text \"...\"}."
-"- If you output an extract MAP, it MUST include:"
-"  - :text (string)"
-"  - :kind (keyword, e.g. :note/:fact/:decision/:todo)"
-"  - :confidence (0.0–1.0)"
-"  - :tags (vector of 5–10 strings)"
-"- Tag rules:"
-"  - lowercase"
-"  - short tokens, no spaces (use hyphen if needed)"
-"  - prefer concrete nouns/models (e.g. \"93r\", \"foregrip\", \"trigger-guard\", \"mcx\", \"1913\")"
-"- :query-back must be a vector (possibly empty), never nil."
-"- :meta must be a map (possibly empty)."
+   "- :extract must be a vector (possibly empty)."
+   "- Each extract item should be either:"
+   "  - a string, OR"
+   "  - a map with at least {:text \"...\"}."
+   "- If you output an extract MAP, it MUST include:"
+   "  - :text (string)"
+   "  - :kind (keyword, e.g. :note/:fact/:decision/:todo)"
+   "  - :confidence (0.0–1.0)"
+   "  - :tags (vector of 3–8 strings)"
+   "- Tag rules:"
+   "  - lowercase"
+   "  - short tokens, no spaces (use hyphen if needed)"
+   "  - prefer concrete nouns/models (e.g. \"93r\", \"foregrip\", \"trigger-guard\", \"mcx\", \"1913\")"
+   "- :query-back must be a vector (possibly empty), never nil."
+   "- :meta must be a map (possibly empty)."
    ""
    "Evidence usage:"
-   "- You will be given :knowledge {:evidence [...]}, containing chat messages."
-   "- Those messages are scoped to the current channel; do not invent cross-channel context."
-   "- Prefer grounding your answer in those messages."
+   "- You will be given :knowledge {:evidence [...]}, containing chat messages and extract summaries."
+   "- Evidence is scoped to the current channel; do not invent cross-channel context."
+   "- Prefer grounding your answer in those messages/extracts."
    "- If evidence is missing or insufficient, set :sufficient? false and request :query-back."
    ""
    "Query-back:"
@@ -274,6 +274,82 @@
           [])))))
 
 ;; -----------------------------------------------------------------------------
+;; NEW (B): related extracts by tag overlap (Mode A, same channel)
+;; -----------------------------------------------------------------------------
+
+(def ^:private stopwords
+  #{"the" "a" "an" "and" "or" "to" "of" "in" "on" "for" "with" "is" "it" "that"
+    "this" "be" "are" "was" "were" "as" "at" "by" "from" "but" "so" "if" "you"
+    "we" "i" "they" "he" "she" "them" "their" "our" "your" "its" "about" "what"
+    "saying" "said" "talking" "discuss" "discussion" "summarize" "quick" "test"})
+
+(defn- candidate-tags-from-question
+  "Turn user question into a small set of tags we can match against :extract/tags.
+  Deterministic; no extra model calls."
+  [s]
+  (let [s (-> (or s "") str/lower-case)
+        ;; model-ish tokens like 93r, m4a4, g19, 1913, mcx/mpx, etc.
+        modelish (re-seq #"\b[a-z]{1,4}\d{1,4}[a-z]?\b" s)
+        words (->> (re-seq #"[a-z]{3,}" s)
+                   (remove stopwords))
+        tags (->> (concat modelish words)
+                  (map #(str/replace % #"[^a-z0-9\-]+" ""))
+                  (remove str/blank?)
+                  distinct
+                  (take 12)
+                  vec)]
+    tags))
+
+(defn- related-extract-evidence
+  "Pull recent extracts in this channel that overlap tags derived from question."
+  [msg question]
+  (let [cfg (config/load-config)
+        cid (some-> (:channel-id msg) str)
+        limit (long (or (:slap-related-extract-limit cfg) 12))
+        tags (candidate-tags-from-question question)]
+    (if (or (not (seq cid)) (empty? tags))
+      []
+      (let [dbv (db/db)
+            ;; query returns multiple rows per extract (one per matching tag)
+            rows (dlv/q '[:find ?eid ?ts ?txt ?kind ?conf ?tag
+                          :in $ ?cid [?tags ...]
+                          :where
+                          [?eid :extract/channel-id ?cid]
+                          [?eid :extract/ts ?ts]
+                          [?eid :extract/text ?txt]
+                          [?eid :extract/kind ?kind]
+                          [?eid :extract/confidence ?conf]
+                          [?eid :extract/tags ?tag]
+                          [(contains? (set ?tags) ?tag)]]
+                        dbv cid tags)
+            ;; group by extract entity id, count overlaps, keep newest ts
+            grouped (->> rows
+                         (group-by first)
+                         (map (fn [[eid rs]]
+                                (let [ts (->> rs (map second) (apply max))
+                                      txt (nth (first rs) 2)
+                                      kind (nth (first rs) 3)
+                                      conf (nth (first rs) 4)
+                                      matched (->> rs (map #(nth % 5)) distinct vec)]
+                                  {:extract/eid eid
+                                   :extract/ts (str (iso-or-str ts))
+                                   :extract/text txt
+                                   :extract/kind kind
+                                   :extract/confidence conf
+                                   :extract/matched-tags matched
+                                   :extract/overlap (count matched)})))
+                         ;; rank: overlap desc, ts desc
+                         (sort-by (fn [m] [(- (:extract/overlap m)) (:extract/ts m)]) )
+                         (take limit)
+                         vec)]
+        (if (seq grouped)
+          [{:evidence/type :datalevin/extract-related
+            :purpose "Related prior extracts in this channel matched by tag overlap."
+            :tags tags
+            :rows grouped}]
+          [])))))
+
+;; -----------------------------------------------------------------------------
 ;; Packet builder (Mode A temporal + persona)
 ;; -----------------------------------------------------------------------------
 
@@ -352,10 +428,7 @@
 (defn- normalize-extract-item
   "Coerce model extract items into either:
   - string
-  - {:text \"...\" ...} map
-
-  This prevents the model from returning odd shapes like {:content ...} or
-  {:author-name ... :content ...}."
+  - {:text \"...\" ...} map"
   [x]
   (cond
     (nil? x) nil
@@ -379,7 +452,6 @@
     :else nil))
 
 (defn- normalize-extracts
-  "Normalize response :extract into a vector of acceptable items for db/upsert-extracts!."
   [extract]
   (->> (or extract [])
        (map normalize-extract-item)
@@ -397,7 +469,9 @@
   (let [packet-id (new-id)
         conversation-id (new-id)
         question (str (or (:content msg) ""))
-        seed (preseed-evidence msg question)]
+        ;; seed includes: preseed messages + related extracts (B)
+        seed (vec (concat (preseed-evidence msg question)
+                          (related-extract-evidence msg question)))]
     (build-request {:packet-id packet-id
                     :conversation-id conversation-id
                     :depth 0
@@ -415,7 +489,9 @@
          packet-id (new-id)
          conversation-id (new-id)
          question (str (or (:content msg) ""))
-         seed (preseed-evidence msg question)
+         ;; seed includes: preseed messages + related extracts (B)
+         seed (vec (concat (preseed-evidence msg question)
+                           (related-extract-evidence msg question)))
          write-ctx {:guild-id (:guild-id msg)
                     :channel-id (:channel-id msg)
                     :message-id (:id msg)
