@@ -298,7 +298,11 @@
 
 (defn- related-extract-evidence
   "Pull extracts in this channel matched by tag overlap.
-  IMPORTANT: Uses :extract/tag (singular, cardinality-many)."
+
+  Robust behavior:
+  - Only *joins* on attrs that must exist: :extract/channel-id, :extract/text, :extract/tag
+  - Pulls optional attrs (:extract/ts/:extract/kind/:extract/confidence) with defaults
+  - Returns an evidence block if ANY overlaps are found."
   [msg question]
   (let [cfg (config/load-config)
         cid (some-> (:channel-id msg) str)
@@ -307,42 +311,49 @@
     (if (or (not (seq cid)) (empty? tags))
       []
       (let [dbv (db/db)
-            ;; Join on candidate tags directly: [?tag ...]
-            rows (dlv/q '[:find ?eid ?ts ?txt ?kind ?conf ?tag
+
+            ;; Only require minimal attrs so we don't accidentally drop older rows.
+            ;; rows = [eid txt matched-tag]
+            rows (dlv/q '[:find ?eid ?txt ?tag
                           :in $ ?cid [?tag ...]
                           :where
                           [?eid :extract/channel-id ?cid]
-                          [?eid :extract/ts ?ts]
                           [?eid :extract/text ?txt]
-                          [?eid :extract/kind ?kind]
-                          [?eid :extract/confidence ?conf]
                           [?eid :extract/tag ?tag]]
                         dbv cid tags)
-            grouped (->> rows
-                         (group-by first)
-                         (map (fn [[eid rs]]
-                                (let [ts (->> rs (map second) (apply max))
-                                      txt (nth (first rs) 2)
-                                      kind (nth (first rs) 3)
-                                      conf (nth (first rs) 4)
-                                      matched (->> rs (map #(nth % 5)) distinct vec)]
-                                  {:extract/eid eid
-                                   :extract/ts (str (iso-or-str ts))
-                                   :extract/text txt
-                                   :extract/kind kind
-                                   :extract/confidence conf
-                                   :extract/matched-tags matched
-                                   :extract/overlap (count matched)})))
-                         ;; rank: overlap desc, then ts desc
-                         (sort-by (fn [m] [(- (:extract/overlap m)) (:extract/ts m)]))
-                         (take limit)
-                         vec)]
+
+            grouped
+            (->> rows
+                 (group-by first)
+                 (map (fn [[eid rs]]
+                        (let [txt (nth (first rs) 1)
+                              matched (->> rs (map #(nth % 2)) distinct vec)
+                              ;; pull optional fields; tolerate missing
+                              pulled (dlv/pull dbv
+                                               [:extract/ts :extract/kind :extract/confidence]
+                                               eid)
+                              ts (or (:extract/ts pulled) (java.util.Date.))
+                              kind (or (:extract/kind pulled) :note)
+                              conf (double (or (:extract/confidence pulled) 0.75))]
+                          {:extract/eid eid
+                           :extract/ts (str (iso-or-str ts))
+                           :extract/text txt
+                           :extract/kind kind
+                           :extract/confidence conf
+                           :extract/matched-tags matched
+                           :extract/overlap (count matched)})))
+                 ;; rank: overlap desc, then ts desc (string ts is fine for display; ts ranking is secondary)
+                 (sort-by (fn [m] [(- (:extract/overlap m)) (:extract/ts m)]))
+                 (take limit)
+                 vec)]
         (if (seq grouped)
           [{:evidence/type :datalevin/extract-related
             :purpose "Related prior extracts in this channel matched by tag overlap."
             :tags tags
             :rows grouped}]
           [])))))
+
+
 
 ;; -----------------------------------------------------------------------------
 ;; Packet builder
