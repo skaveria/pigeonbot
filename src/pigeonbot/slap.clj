@@ -30,6 +30,7 @@
     :else {}))
 
 (defn- extract-output-text
+  "Extract assistant text from OpenAI Responses API result."
   [resp-body]
   (let [m (decode-body resp-body)]
     (or
@@ -56,6 +57,7 @@
       (str resp-body))))
 
 (defn- openai-edn!
+  "Call OpenAI, forcing EDN-only output."
   [system-lines user-text]
   (let [{:keys [base-url api-key model timeout]} (openai-cfg)
         _ (when-not (and (string? api-key) (seq api-key))
@@ -73,67 +75,13 @@
     (cond
       error
       (throw (ex-info "OpenAI request failed" {:error (str error) :endpoint ep}))
+
       (or (nil? status) (not (<= 200 status 299)))
       (throw (ex-info "OpenAI returned non-2xx" {:status status :body body :endpoint ep}))
+
       :else
       (-> (extract-output-text body) str str/trim))))
 
-
-(defn extract-item->tx
-  "Convert one extract item to a tx map.
-  Supports:
-  - string  -> {:extract/text \"...\" :extract/kind :note}
-  - map     -> accepts :text or :content (and :extract/text / :extract/content)
-  Context params supply scope + provenance."
-  [ctx item]
-  (let [{:keys [guild-id channel-id message-id packet-id model]} ctx
-        base {:db/id             (dlv/tempid :db.part/user)
-              :extract/id         (str (java.util.UUID/randomUUID))
-              :extract/ts         (now-date)
-              :extract/guild-id   (some-> guild-id str)
-              :extract/channel-id (some-> channel-id str)
-              :extract/message-id (some-> message-id str)
-              :extract/packet-id  (some-> packet-id str)
-              :extract/model      (or model "openai")}
-        item-map (cond
-                   (string? item)
-                   {:text item
-                    :kind :note
-                    :confidence 0.75
-                    :tags []}
-
-                   (map? item)
-                   item
-
-                   :else nil)]
-    (when item-map
-      (let [;; accept several common fields
-            txt (some-> (or (:text item-map)
-                            (:content item-map)
-                            (:extract/text item-map)
-                            (:extract/content item-map))
-                        str
-                        str/trim)
-            kind (or (:kind item-map)
-                     (:extract/kind item-map)
-                     :note)
-            conf (double (or (:confidence item-map)
-                             (:extract/confidence item-map)
-                             0.75))
-            scope (or (:scope item-map)
-                      (:extract/scope item-map)
-                      :channel)
-            tags (normalize-tags (or (:tags item-map)
-                                     (:extract/tags item-map)
-                                     []))]
-        (when (seq txt)
-          (drop-nils
-           (cond-> (assoc base
-                          :extract/text txt
-                          :extract/kind kind
-                          :extract/confidence conf
-                          :extract/scope scope)
-             (seq tags) (assoc :extract/tags tags))))))))
 ;; -----------------------------------------------------------------------------
 ;; SLAP helpers
 ;; -----------------------------------------------------------------------------
@@ -143,7 +91,9 @@
 
 (defn- new-id [] (str (java.util.UUID/randomUUID)))
 
-(defn- iso-or-str [x]
+(defn- iso-or-str
+  "Render timestamps nicely. Datalevin stores instants as java.util.Date in our setup."
+  [x]
   (cond
     (instance? java.util.Date x) (.toString (.toInstant ^java.util.Date x))
     :else (str x)))
@@ -157,6 +107,9 @@
    ""
    "IMPORTANT OUTPUT SHAPE:"
    "- :extract must be a vector (possibly empty)."
+   "- Each extract item should be either:"
+   "  - a string, OR"
+   "  - a map with at least {:text \"...\"} (optional :kind/:confidence/:tags)."
    "- :query-back must be a vector (possibly empty), never nil."
    "- :meta must be a map (possibly empty)."
    ""
@@ -172,13 +125,15 @@
    "{:query/id \"q1\" :tool :datalevin/fts :query {:fts \"...\"} :expected {:limit 10} :purpose \"...\" :priority 1}"
    ""
    "Persona:"
-   "- You will be given :identity/bot persona details. Follow that voice."
+   "- You will be given :identity/bot persona details and a PERSONA section. Follow that voice."
    ""
    "Style:"
    "- Keep :answer concise (1-3 sentences unless asked for more)."
    "- Never include secrets."])
 
-(defn- persona-instructions []
+(defn- persona-instructions
+  "Promote pigeonbot persona into system-level steering so the sass sticks."
+  []
   (let [cfg (config/load-config)
         p (some-> (:persona-prompt cfg) str str/trim)]
     (cond-> (vec (slap-system-instructions))
@@ -187,7 +142,7 @@
              "PERSONA (obey this voice guide):"
              p
              ""
-             "Style reminder: be playful, sassy pigeon entity; concise; avoid corporate assistant tone."]))))
+             "Style reminder: be playful, sassy pigeon entity; concise; avoid generic assistant tone."]))))
 
 (defn- safe-edn-read [s]
   (try
@@ -217,7 +172,9 @@
     (throw (ex-info "SLAP: :meta must be map" {:meta (:meta resp)})))
   resp)
 
-(defn- bot-persona []
+(defn- bot-persona
+  "Persona block for :identity/bot. Configurable, with sane defaults."
+  []
   (let [cfg (config/load-config)]
     {:bot/name (or (:bot-name cfg) "pigeonbot")
      :bot/version (or (:bot-version cfg) "dev")
@@ -230,7 +187,9 @@
 ;; Datalevin utilities (Mode A: channel-first scoping)
 ;; -----------------------------------------------------------------------------
 
-(defn- pull-message [dbv eid]
+(defn- pull-message
+  "Pull a compact message map by eid."
+  [dbv eid]
   (try
     (dlv/pull dbv
               [:message/id
@@ -244,12 +203,18 @@
               eid)
     (catch Throwable _ nil)))
 
-(defn- same-channel? [msg m]
+(defn- same-channel?
+  "Mode A: only same channel counts as 'in scope'."
+  [msg m]
   (let [cid (some-> (:channel-id msg) str)
         mcid (some-> (:message/channel-id m) str)]
-    (if (seq cid) (= cid mcid) true)))
+    (if (seq cid)
+      (= cid mcid)
+      true)))
 
-(defn- recent-messages-from-db [msg n]
+(defn- recent-messages-from-db
+  "Fetch last N messages from the SAME CHANNEL for temporal context (Mode A)."
+  [msg n]
   (let [dbv (db/db)
         cid (some-> (:channel-id msg) str)]
     (if-not (seq cid)
@@ -273,7 +238,12 @@
                      :content (str txt)}))
              vec)))))
 
-(defn- preseed-evidence [msg question]
+(defn- preseed-evidence
+  "Initial 'slap spice' from Datalevin (Mode A).
+  - Run FTS on the question
+  - Pull top N messages
+  - FILTER to same channel only"
+  [msg question]
   (let [cfg (config/load-config)
         limit (long (or (:slap-preseed-limit cfg) 25))
         q (-> (or question "") str str/trim)]
@@ -295,10 +265,11 @@
           [])))))
 
 ;; -----------------------------------------------------------------------------
-;; Packet builder
+;; Packet builder (Mode A temporal + persona)
 ;; -----------------------------------------------------------------------------
 
-(defn- build-request [{:keys [packet-id conversation-id depth msg evidence]}]
+(defn- build-request
+  [{:keys [packet-id conversation-id depth msg evidence]}]
   (let [{:keys [channel-id guild-id id content author]} msg
         author-id (some-> (or (:id author) (get-in author [:user :id])) str)
         author-name (or (:global_name author)
@@ -329,10 +300,12 @@
      :task {:goal "Answer the user's message using available evidence. If insufficient, request query-back."}}))
 
 ;; -----------------------------------------------------------------------------
-;; Query-back tool: :datalevin/fts
+;; Query-back tool: :datalevin/fts (Mode A scoping)
 ;; -----------------------------------------------------------------------------
 
-(defn- fts-evidence [msg item]
+(defn- fts-evidence
+  "Execute a single :datalevin/fts query-back item (Mode A: same channel only)."
+  [msg item]
   (let [qid (or (:query/id item) (new-id))
         purpose (or (:purpose item) "")
         q (or (get-in item [:query :fts]) "")
@@ -351,7 +324,9 @@
      :fts q
      :rows rows}))
 
-(defn- run-query-back [msg query-back]
+(defn- run-query-back
+  "Execute :query-back items. Returns vector of evidence maps."
+  [msg query-back]
   (->> (or query-back [])
        (sort-by (fn [q] (or (:priority q) 999)))
        (mapcat
@@ -362,10 +337,53 @@
        vec))
 
 ;; -----------------------------------------------------------------------------
+;; Extract normalization (so db/upsert-extracts! always sees :text or strings)
+;; -----------------------------------------------------------------------------
+
+(defn- normalize-extract-item
+  "Coerce model extract items into either:
+  - string
+  - {:text \"...\" ...} map
+
+  This prevents the model from returning odd shapes like {:content ...} or
+  {:author-name ... :content ...}."
+  [x]
+  (cond
+    (nil? x) nil
+
+    (string? x)
+    (let [s (str/trim x)]
+      (when (seq s) s))
+
+    (map? x)
+    (let [txt (or (:text x) (:content x) (:extract/text x) (:extract/content x))
+          txt (some-> txt str str/trim)
+          kind (or (:kind x) (:extract/kind x) :note)
+          conf (double (or (:confidence x) (:extract/confidence x) 0.75))
+          tags (or (:tags x) (:extract/tags x) [])]
+      (when (seq txt)
+        {:text txt
+         :kind kind
+         :confidence conf
+         :tags tags}))
+
+    :else nil))
+
+(defn- normalize-extracts
+  "Normalize response :extract into a vector of acceptable items for db/upsert-extracts!."
+  [extract]
+  (->> (or extract [])
+       (map normalize-extract-item)
+       (remove nil?)
+       vec))
+
+;; -----------------------------------------------------------------------------
 ;; Public API
 ;; -----------------------------------------------------------------------------
 
-(defn build-first-packet [msg]
+(defn build-first-packet
+  "REPL helper: show the exact first request packet (with preseed + temporal)."
+  [msg]
   (db/ensure-conn!)
   (let [packet-id (new-id)
         conversation-id (new-id)
@@ -389,11 +407,11 @@
          conversation-id (new-id)
          question (str (or (:content msg) ""))
          seed (preseed-evidence msg question)
-         ctxx {:guild-id (:guild-id msg)
-               :channel-id (:channel-id msg)
-               :message-id (:id msg)
-               :packet-id packet-id
-               :model (str model)}]
+         write-ctx {:guild-id (:guild-id msg)
+                    :channel-id (:channel-id msg)
+                    :message-id (:id msg)
+                    :packet-id packet-id
+                    :model (str model)}]
      (loop [depth 0
             evidence (vec seed)
             queries-used 0]
@@ -403,14 +421,15 @@
                                  :msg msg
                                  :evidence evidence})
              raw (openai-edn! (persona-instructions) (pr-str req))
-             resp (-> raw safe-edn-read (validate-response! packet-id))
-             qb (vec (or (:query-back resp) []))
-             resp (assoc resp :query-back qb)
+             resp0 (-> raw safe-edn-read (validate-response! packet-id))
+             qb (vec (or (:query-back resp0) []))
+             ex (normalize-extracts (:extract resp0))
+             resp (assoc resp0 :query-back qb :extract ex)
              sufficient? (true? (:sufficient? resp))]
 
          ;; write extracts every turn (best-effort)
          (try
-           (db/upsert-extracts! ctxx (:extract resp))
+           (db/upsert-extracts! write-ctx ex)
            (catch Throwable t
              (println "extract write error:" (.getMessage t))))
 
