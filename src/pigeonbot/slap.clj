@@ -128,6 +128,19 @@
    "- Keep :answer concise (1-3 sentences unless asked for more)."
    "- Never include secrets."])
 
+(defn- persona-instructions
+  "Promote pigeonbot persona into system-level steering so the sass sticks."
+  []
+  (let [cfg (config/load-config)
+        p (some-> (:persona-prompt cfg) str str/trim)]
+    (cond-> (vec (slap-system-instructions))
+      (seq p)
+      (into [""
+             "PERSONA (obey this voice guide):"
+             p
+             ""
+             "Style reminder: be wry, haunted-cozy, slightly sassy; concise; avoid generic assistant tone."]))))
+
 (defn- safe-edn-read [s]
   (try
     (edn/read-string {:readers {} :default (fn [_tag v] v)} s)
@@ -357,7 +370,7 @@
                                  :depth depth
                                  :msg msg
                                  :evidence evidence})
-             raw (openai-edn! (slap-system-instructions) (pr-str req))
+             raw (openai-edn! (persona-instructions) (pr-str req))
              resp (-> raw safe-edn-read (validate-response! packet-id))
              qb (vec (or (:query-back resp) []))
              resp (assoc resp :query-back qb)
