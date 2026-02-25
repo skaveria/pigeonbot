@@ -249,11 +249,20 @@
              vec)))))
 
 (defn- preseed-evidence
-  "Initial evidence from Datalevin fulltext, filtered to same channel."
+  "Initial evidence from Datalevin fulltext.
+
+  Global default:
+  - If :guild-id is present -> prefer guild-wide filtering
+  - Else -> fall back to channel-only filtering
+
+  This prevents 'coop empty' when the current channel hasn't discussed the topic,
+  while still never crossing guild boundaries."
   [msg question]
   (let [cfg (config/load-config)
         limit (long (or (:slap-preseed-limit cfg) 25))
-        q (-> (or question "") str str/trim)]
+        q (-> (or question "") str str/trim)
+        gid (some-> (:guild-id msg) str)
+        cid (some-> (:channel-id msg) str)]
     (if (str/blank? q)
       []
       (let [hits (take limit (db/fulltext q))
@@ -262,11 +271,17 @@
             rows (->> eids
                       (map (fn [eid] (pull-message dbv eid)))
                       (remove nil?)
-                      (filter (partial same-channel? msg))
+                      (filter (fn [m]
+                                (cond
+                                  (seq gid) (= (some-> (:message/guild-id m) str) gid)
+                                  (seq cid) (= (some-> (:message/channel-id m) str) cid)
+                                  :else true)))
                       vec)]
         (if (seq rows)
           [{:evidence/type :datalevin/preseed
-            :purpose "Top relevant chat messages from Datalevin for the current question (same channel)."
+            :purpose (if (seq gid)
+                       "Top relevant chat messages from Datalevin for the current question (guild-wide)."
+                       "Top relevant chat messages from Datalevin for the current question (channel-only).")
             :fts q
             :rows rows}]
           [])))))
