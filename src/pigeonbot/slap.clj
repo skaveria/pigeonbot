@@ -274,7 +274,6 @@
 ;; -----------------------------------------------------------------------------
 ;; B) Related extracts by tag overlap (Mode A, same channel) -- CORRECT :extract/tag
 ;; -----------------------------------------------------------------------------
-
 (def ^:private stopwords
   #{"the" "a" "an" "and" "or" "to" "of" "in" "on" "for" "with" "is" "it" "that"
     "this" "be" "are" "was" "were" "as" "at" "by" "from" "but" "so" "if" "you"
@@ -282,19 +281,38 @@
     "saying" "said" "talking" "discuss" "discussion" "summarize" "quick" "test"})
 
 (defn- candidate-tags-from-question
-  "Deterministic tags from question to match against :extract/tag."
+  "Deterministic tags from question to match against :extract/tag.
+
+  Important: capture BOTH letter-first and digit-first model tokens:
+  - m4a4, g19, mcx, 1913
+  - 93r, 10mm, 9mm"
   [s]
   (let [s (-> (or s "") str/lower-case)
-        modelish (re-seq #"\b[a-z]{1,4}\d{1,4}[a-z]?\b" s)
+
+        ;; letter-first: m4a4, g19, mp5, 1911-ish
+        modelish-a (re-seq #"\b[a-z]{1,6}\d{1,6}[a-z]?\b" s)
+
+        ;; digit-first: 93r, 10mm, 9mm, 7.62 (we'll normalize '.' away later)
+        modelish-b (re-seq #"\b\d{1,6}[a-z]{1,6}\b" s)
+
+        ;; plain words (for backup)
         words (->> (re-seq #"[a-z]{3,}" s)
                    (remove stopwords))
-        tags (->> (concat modelish words)
-                  (map #(str/replace % #"[^a-z0-9\-]+" ""))
+
+        ;; If both words appear, add a combined hyphen tag (nice for overlap)
+        has-trigger (boolean (re-find #"\btrigger\b" s))
+        has-guard   (boolean (re-find #"\bguard\b" s))
+        compounds   (cond-> []
+                      (and has-trigger has-guard) (conj "trigger-guard"))
+
+        tags (->> (concat modelish-a modelish-b compounds words)
+                  (map #(str/replace % #"[^a-z0-9\-]+" "")) ;; drop punctuation like "7.62"
                   (remove str/blank?)
                   distinct
                   (take 12)
                   vec)]
     tags))
+
 
 (defn- related-extract-evidence
   "Pull extracts in this channel matched by tag overlap.
