@@ -315,30 +315,30 @@
 ;;slap working 
 
 (defn- related-extract-evidence
-  "Pull extracts in this channel matched by tag overlap.
+  "Pull extracts in this guild matched by tag overlap (global default).
 
-  Robust behavior:
-  - Only *joins* on attrs that must exist: :extract/channel-id, :extract/text, :extract/tag
-  - Pulls optional attrs (:extract/ts/:extract/kind/:extract/confidence) with defaults
-  - Returns an evidence block if ANY overlaps are found."
+  Behavior:
+  - Searches across entire guild (not just channel)
+  - Still scoped to same guild-id
+  - Ranks by overlap count
+  - Safe: never crosses guild boundary"
   [msg question]
   (let [cfg (config/load-config)
-        cid (some-> (:channel-id msg) str)
-        limit (long (or (:slap-related-extract-limit cfg) 12))
+        gid (some-> (:guild-id msg) str)
+        limit (long (or (:slap-related-extract-limit cfg) 20))
         tags (candidate-tags-from-question question)]
-    (if (or (not (seq cid)) (empty? tags))
+    (if (or (not (seq gid)) (empty? tags))
       []
       (let [dbv (db/db)
-
-            ;; Only require minimal attrs so we don't accidentally drop older rows.
-            ;; rows = [eid txt matched-tag]
-            rows (dlv/q '[:find ?eid ?txt ?tag
-                          :in $ ?cid [?tag ...]
-                          :where
-                          [?eid :extract/channel-id ?cid]
-                          [?eid :extract/text ?txt]
-                          [?eid :extract/tag ?tag]]
-                        dbv cid tags)
+            rows (dlv/q
+                  '[:find ?eid ?txt ?tag ?cid
+                    :in $ ?gid [?tag ...]
+                    :where
+                    [?eid :extract/guild-id ?gid]
+                    [?eid :extract/text ?txt]
+                    [?eid :extract/tag ?tag]
+                    [?eid :extract/channel-id ?cid]]
+                  dbv gid tags)
 
             grouped
             (->> rows
@@ -346,31 +346,32 @@
                  (map (fn [[eid rs]]
                         (let [txt (nth (first rs) 1)
                               matched (->> rs (map #(nth % 2)) distinct vec)
-                              ;; pull optional fields; tolerate missing
+                              cid (nth (first rs) 3)
                               pulled (dlv/pull dbv
-                                               [:extract/ts :extract/kind :extract/confidence]
+                                               [:extract/ts
+                                                :extract/kind
+                                                :extract/confidence]
                                                eid)
                               ts (or (:extract/ts pulled) (java.util.Date.))
                               kind (or (:extract/kind pulled) :note)
                               conf (double (or (:extract/confidence pulled) 0.75))]
                           {:extract/eid eid
                            :extract/ts (str (iso-or-str ts))
+                           :extract/channel-id cid
                            :extract/text txt
                            :extract/kind kind
                            :extract/confidence conf
                            :extract/matched-tags matched
                            :extract/overlap (count matched)})))
-                 ;; rank: overlap desc, then ts desc (string ts is fine for display; ts ranking is secondary)
-                 (sort-by (fn [m] [(- (:extract/overlap m)) (:extract/ts m)]))
+                 (sort-by (fn [m] (- (:extract/overlap m))))
                  (take limit)
                  vec)]
         (if (seq grouped)
           [{:evidence/type :datalevin/extract-related
-            :purpose "Related prior extracts in this channel matched by tag overlap."
+            :purpose "Related prior extracts in this guild matched by tag overlap."
             :tags tags
             :rows grouped}]
           [])))))
-
 
 
 ;; -----------------------------------------------------------------------------
@@ -479,14 +480,19 @@
 ;; -----------------------------------------------------------------------------
 ;; Public API
 ;; -----------------------------------------------------------------------------
-
 (defn build-first-packet
-  "REPL helper: show the exact first request packet (with evidence seed)."
+  "REPL helper: show the exact first request packet (with evidence seed).
+
+  Global-default behavior:
+  - preseed-evidence searches guild-wide (if :guild-id present), else falls back to channel-only.
+  - related-extract-evidence is also guild-wide (same guild only)."
   [msg]
   (db/ensure-conn!)
   (let [packet-id (new-id)
         conversation-id (new-id)
         question (str (or (:content msg) ""))
+        ;; NOTE: preseed-evidence + related-extract-evidence must be updated
+        ;; to use guild scope by default (they should no longer be Mode A only).
         seed (vec (concat (preseed-evidence msg question)
                           (related-extract-evidence msg question)))]
     (build-request {:packet-id packet-id
