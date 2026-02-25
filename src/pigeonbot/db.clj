@@ -122,3 +122,20 @@
           :in $ ?q ?opts
           :where [(fulltext $ ?q ?opts) [[?e ?a ?v]]]]
         (db) query opts)))
+
+(defn pull-message
+  "Pull a message entity by eid."
+  [dbv eid]
+  (try
+    (d/pull dbv
+            [:message/id
+             :message/ts
+             :message/guild-id
+             :message/channel-id
+             :message/channel-type
+             :message/author-id
+             :message/author-name
+             :message/bot?
+             :message/content]
+            eid)
+    (catch Throwable _ nil)))

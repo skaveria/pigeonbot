@@ -4,6 +4,8 @@
             [pigeonbot.threads :as threads]
             [pigeonbot.context :as ctx]
             [pigeonbot.brain :as brain]
+            [pigeonbot.config :as config]
+            [pigeonbot.slap :as slap]
             [pigeonbot.state :refer [state]]
             [pigeonbot.commands.registry :refer [defcmd]]
             [pigeonbot.commands.util :as u]))
@@ -58,6 +60,18 @@
 (defn- build-ask-context [msg]
   (ctx/context-text msg))
 
+(defn- slap-enabled? []
+  (true? (:slap-enabled? (config/load-config))))
+
+(defn- ask-reply
+  "Compute the reply text either via SLAP or the direct brain backend."
+  [msg question]
+  (if (slap-enabled?)
+    (let [{:keys [answer]} (slap/run-slap! (assoc msg :content (str question)))]
+      (str (or answer "")))
+    (let [context-text (build-ask-context msg)]
+      (brain/ask-with-context context-text question))))
+
 (defn run-ask!
   "Core ask runner. If reply-to-id provided, sends as a reply.
   Uses typing indicator instead of \"Hm. Lemme think…\"."
@@ -84,8 +98,7 @@
 
          (future
            (try
-             (let [context-text (build-ask-context msg)
-                   reply (brain/ask-with-context context-text question)
+             (let [reply (ask-reply msg question)
                    reply (u/clamp-discord reply)]
                (reset! done? true)
                (if reply-to-id
