@@ -180,6 +180,43 @@
     (throw (ex-info "SLAP: :meta must be map" {:meta (:meta resp)})))
   resp)
 
+
+(defn- repo-preseed-evidence
+  "Repo-only code memory: run FTS over indexed repo files and include snippets.
+  Returns an evidence block or [].
+
+  Config knobs (optional):
+    :slap-repo-preseed-limit (default 6)
+    :slap-repo-snippet-chars (default 900)"
+  [question]
+  (let [cfg (config/load-config)
+        limit (long (or (:slap-repo-preseed-limit cfg) 6))
+        snip (long (or (:slap-repo-snippet-chars cfg) 900))
+        q (-> (or question "") str str/trim)]
+    (if (str/blank? q)
+      []
+      (let [hits (take limit (db/repo-fulltext q))
+            eids (->> hits (map first) distinct vec)
+            dbv (db/db)
+            rows (->> eids
+                      (map (fn [eid]
+                             (when-let [m (db/pull-repo-file dbv eid)]
+                               (let [path (:repo/path m)
+                                     txt  (or (:repo/text m) "")
+                                     snippet (subs txt 0 (min (count txt) snip))]
+                                 {:path path
+                                  :sha (:repo/sha m)
+                                  :kind (:repo/kind m)
+                                  :snippet snippet}))))
+                      (remove nil?)
+                      vec)]
+        (if (seq rows)
+          [{:evidence/type :datalevin/repo-preseed
+            :purpose "Relevant repo files (repo-only) retrieved from Datalevin."
+            :fts q
+            :rows rows}]
+          [])))))
+
 (defn- bot-persona
   "Persona block for :identity/bot. Configurable, with sane defaults."
   []
@@ -495,21 +532,22 @@
 ;; -----------------------------------------------------------------------------
 ;; Public API
 ;; -----------------------------------------------------------------------------
+
 (defn build-first-packet
   "REPL helper: show the exact first request packet (with evidence seed).
 
   Global-default behavior:
   - preseed-evidence searches guild-wide (if :guild-id present), else falls back to channel-only.
-  - related-extract-evidence is also guild-wide (same guild only)."
+  - related-extract-evidence is also guild-wide (same guild only).
+  - repo-preseed-evidence searches indexed repo files (repo-only)."
   [msg]
   (db/ensure-conn!)
   (let [packet-id (new-id)
         conversation-id (new-id)
         question (str (or (:content msg) ""))
-        ;; NOTE: preseed-evidence + related-extract-evidence must be updated
-        ;; to use guild scope by default (they should no longer be Mode A only).
         seed (vec (concat (preseed-evidence msg question)
-                          (related-extract-evidence msg question)))]
+                          (related-extract-evidence msg question)
+                          (repo-preseed-evidence question)))]
     (build-request {:packet-id packet-id
                     :conversation-id conversation-id
                     :depth 0
