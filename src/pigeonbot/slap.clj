@@ -78,6 +78,62 @@
       :else
       (-> (extract-output-text body) str str/trim))))
 
+
+(defn extract-item->tx
+  "Convert one extract item to a tx map.
+  Supports:
+  - string  -> {:extract/text \"...\" :extract/kind :note}
+  - map     -> accepts :text or :content (and :extract/text / :extract/content)
+  Context params supply scope + provenance."
+  [ctx item]
+  (let [{:keys [guild-id channel-id message-id packet-id model]} ctx
+        base {:db/id             (d/tempid :db.part/user)
+              :extract/id         (str (java.util.UUID/randomUUID))
+              :extract/ts         (now-date)
+              :extract/guild-id   (some-> guild-id str)
+              :extract/channel-id (some-> channel-id str)
+              :extract/message-id (some-> message-id str)
+              :extract/packet-id  (some-> packet-id str)
+              :extract/model      (or model "openai")}
+        item-map (cond
+                   (string? item)
+                   {:text item
+                    :kind :note
+                    :confidence 0.75
+                    :tags []}
+
+                   (map? item)
+                   item
+
+                   :else nil)]
+    (when item-map
+      (let [;; accept several common fields
+            txt (some-> (or (:text item-map)
+                            (:content item-map)
+                            (:extract/text item-map)
+                            (:extract/content item-map))
+                        str
+                        str/trim)
+            kind (or (:kind item-map)
+                     (:extract/kind item-map)
+                     :note)
+            conf (double (or (:confidence item-map)
+                             (:extract/confidence item-map)
+                             0.75))
+            scope (or (:scope item-map)
+                      (:extract/scope item-map)
+                      :channel)
+            tags (normalize-tags (or (:tags item-map)
+                                     (:extract/tags item-map)
+                                     []))]
+        (when (seq txt)
+          (drop-nils
+           (cond-> (assoc base
+                          :extract/text txt
+                          :extract/kind kind
+                          :extract/confidence conf
+                          :extract/scope scope)
+             (seq tags) (assoc :extract/tags tags))))))))
 ;; -----------------------------------------------------------------------------
 ;; SLAP helpers
 ;; -----------------------------------------------------------------------------
