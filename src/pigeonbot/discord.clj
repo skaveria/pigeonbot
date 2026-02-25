@@ -12,7 +12,7 @@
             [pigeonbot.discljord-patch :as djpatch]
             [pigeonbot.message-reacts :as reacts]
             [pigeonbot.vision-registry :as vision-reg]
-[pigeonbot.vision-reacts :as vision-reacts]
+            [pigeonbot.vision-reacts :as vision-reacts]
             [pigeonbot.reaction-roles :as rr]
             [pigeonbot.state :refer [state]]))
 
@@ -38,19 +38,18 @@
         (swap! state assoc :bot-user-id (str bid)))
       nil)
 
-:message-create
-(do
-  (ctx/record-message! event-data)
+    :message-create
+    (do
+      (ctx/record-message! event-data)
 
-  ;; command routing
-  (commands/handle-message event-data)
+      ;; command routing
+      (commands/handle-message event-data)
 
-  ;; passive reacts
-  (reacts/maybe-react! event-data)
+      ;; passive reacts
+      (reacts/maybe-react! event-data)
 
-  ;; vision rules (image -> labels -> actions)
-  (vision-reacts/maybe-react-vision! event-data)
-  )
+      ;; vision rules (image -> labels -> actions)
+      (vision-reacts/maybe-react-vision! event-data))
 
     :message-reaction-add
     (rr/handle-reaction-add! event-data)
@@ -59,6 +58,37 @@
     (rr/handle-reaction-remove! event-data)
 
     nil))
+
+(defn- supported-intents-set []
+  ;; In discljord 1.3.1 this is a collection (not a map), so treat it as a set.
+  (set c/gateway-intents))
+
+(defn- desired-intents
+  "Choose gateway intents.
+
+  Default is minimal & known-good: #{:guilds :guild-messages}
+
+  You can override via config.edn:
+    :discord-intents [:guilds :guild-messages :guild-message-reactions]
+
+  We automatically drop any intent keywords not supported by this discljord build."
+  []
+  (let [cfg (config/load-config)
+        requested (or (:discord-intents cfg)
+                      [:guilds :guild-messages])
+        supported (supported-intents-set)
+        chosen (->> requested
+                    (map keyword)
+                    (filter supported)
+                    set)
+        dropped (->> requested
+                     (map keyword)
+                     (remove supported)
+                     vec)]
+    (when (seq dropped)
+      (println "WARNING: Dropping unsupported gateway intents:" dropped))
+    chosen))
+
 (defn start-bot
   "Connect to Discord and start the event pump (blocking)."
   []
@@ -75,41 +105,12 @@
                             {:env ["DISCORD_TOKEN" "PIGEONBOT_TOKEN"]})))
 
         event-ch (a/chan 100)
-
-        ;; Reaction intent keyword varies by discljord version.
-        reaction-intent (or (when (contains? c/gateway-intents :guild-message-reactions)
-                              :guild-message-reactions)
-                            (when (contains? c/gateway-intents :guild-message-reaction)
-                              :guild-message-reaction)
-                            (when (contains? c/gateway-intents :guild-message-reaction-add)
-                              :guild-message-reaction-add)
-                            (when (contains? c/gateway-intents :guild-message-reaction-events)
-                              :guild-message-reaction-events))
-
-        ;; Message content intent is privileged and ALSO must be enabled in the Discord dev portal.
-        message-content-intent (or (when (contains? c/gateway-intents :message-content)
-                                     :message-content)
-                                   (when (contains? c/gateway-intents :message_content)
-                                     :message_content)
-                                   (when (contains? c/gateway-intents :message-content-intent)
-                                     :message-content-intent)
-                                   (when (contains? c/gateway-intents :message_content_intent)
-                                     :message_content_intent))
-
-        intents (cond-> #{:guilds :guild-messages}
-                  reaction-intent (conj reaction-intent)
-                  message-content-intent (conj message-content-intent))
+        intents (desired-intents)
 
         conn   (c/connect-bot! token event-ch :intents intents)
         msg-ch (m/start-connection! token)]
 
     (println "Gateway intents:" intents)
-    (when-not reaction-intent
-      (println "WARNING: Could not find a reaction intent keyword in discljord.connections/gateway-intents"))
-    (when-not message-content-intent
-      (println "WARNING: Could not find a message content intent keyword in discljord.connections/gateway-intents"))
-    (when-not (contains? intents (or message-content-intent :message-content))
-      (println "NOTE: If the bot connects but ignores commands, enable Message Content Intent in the Discord Developer Portal (Bot → Privileged Gateway Intents)."))
 
     (reset! state {:connection conn :events event-ch :messaging msg-ch})
     (println "Connected to Discord (online)")
