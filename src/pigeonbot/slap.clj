@@ -180,40 +180,21 @@
     (throw (ex-info "SLAP: :meta must be map" {:meta (:meta resp)})))
   resp)
 
-
 (defn- repo-preseed-evidence
-  "Repo-only code memory: run FTS over indexed repo files and include snippets.
-  Returns an evidence block or [].
-
-  Config knobs (optional):
-    :slap-repo-preseed-limit (default 6)
-    :slap-repo-snippet-chars (default 900)"
+  "Repo-only code memory: search indexed repo files and include snippets.
+  Uses db/repo-search (scan-based) so it works even if :repo/text isn't fulltext-indexed yet."
   [question]
   (let [cfg (config/load-config)
         limit (long (or (:slap-repo-preseed-limit cfg) 6))
-        snip (long (or (:slap-repo-snippet-chars cfg) 900))
+        snip  (long (or (:slap-repo-snippet-chars cfg) 900))
         q (-> (or question "") str str/trim)]
     (if (str/blank? q)
       []
-      (let [hits (take limit (db/repo-fulltext q))
-            eids (->> hits (map first) distinct vec)
-            dbv (db/db)
-            rows (->> eids
-                      (map (fn [eid]
-                             (when-let [m (db/pull-repo-file dbv eid)]
-                               (let [path (:repo/path m)
-                                     txt  (or (:repo/text m) "")
-                                     snippet (subs txt 0 (min (count txt) snip))]
-                                 {:path path
-                                  :sha (:repo/sha m)
-                                  :kind (:repo/kind m)
-                                  :snippet snippet}))))
-                      (remove nil?)
-                      vec)]
+      (let [rows (db/repo-search q {:limit limit :snippet-chars snip})]
         (if (seq rows)
           [{:evidence/type :datalevin/repo-preseed
             :purpose "Relevant repo files (repo-only) retrieved from Datalevin."
-            :fts q
+            :query q
             :rows rows}]
           [])))))
 
