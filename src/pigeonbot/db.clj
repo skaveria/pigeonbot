@@ -47,7 +47,15 @@
    ;; -------------------------
    :extract/id            {:db/unique :db.unique/identity
                            :db/valueType :db.type/string :db/index true}
+
+   ;; NEW: de-dupe key
+   :extract/hash          {:db/unique :db.unique/identity
+                           :db/valueType :db.type/string :db/index true}
+
    :extract/ts            {:db/valueType :db.type/instant :db/index true}
+   :extract/last-seen     {:db/valueType :db.type/instant :db/index true}
+   :extract/seen-count    {:db/valueType :db.type/long    :db/index true}
+
    :extract/text          {:db/valueType :db.type/string  :db/fulltext true}
    :extract/kind          {:db/valueType :db.type/keyword :db/index true}
    :extract/confidence    {:db/valueType :db.type/double  :db/index true}
@@ -63,7 +71,7 @@
                            :db/cardinality :db.cardinality/many
                            :db/index true}
 
-   ;; Legacy: keep for reads/migrations only
+   ;; Legacy (do not write going forward)
    :extract/tags          {:db/valueType :db.type/string  :db/index true}
 
    ;; -------------------------
@@ -213,7 +221,7 @@
     true))
 
 ;; -----------------------------------------------------------------------------
-;; EXTRACT writes (correct tag storage)
+;; EXTRACT writes (dedup + correct tag storage)
 ;; -----------------------------------------------------------------------------
 
 (defn- normalize-tags [xs]
@@ -223,10 +231,38 @@
        distinct
        vec))
 
+(defn- normalize-extract-text [s]
+  (-> (or s "")
+      (str/replace #"\s+" " ")
+      str/trim
+      str/lower-case))
+
+(defn- sha1-hex ^String [^String s]
+  (let [md (java.security.MessageDigest/getInstance "SHA-1")
+        bs (.digest md (.getBytes s "UTF-8"))]
+    (apply str (map (fn [^Byte b] (format "%02x" (bit-and 0xff b))) bs))))
+
+(defn- extract-hash
+  "Stable dedupe key: guild + channel + kind + normalized text."
+  [{:keys [guild-id channel-id kind text]}]
+  (sha1-hex (str (or guild-id "") "|"
+                 (or channel-id "") "|"
+                 (name (or kind :note)) "|"
+                 (normalize-extract-text text))))
+
+(defn- find-extract-eid-by-hash [dbv h]
+  (ffirst (d/q '[:find ?e :in $ ?h :where [?e :extract/hash ?h]]
+               dbv (str h))))
+
+(defn- existing-extract-tags [dbv eid]
+  (set (map first
+            (d/q '[:find ?t :in $ ?e :where [?e :extract/tag ?t]]
+                 dbv eid))))
+
 (defn extract-item->txdata
   "Return tx-data for one extract:
-  - entity map
-  - one [:db/add eid :extract/tag t] per tag"
+  - If new: entity map + :extract/tag datoms
+  - If dup: increment :extract/seen-count, update :extract/last-seen, add missing tags"
   [ctx item]
   (let [{:keys [guild-id channel-id message-id packet-id model]} ctx
         item-map (cond
@@ -242,24 +278,51 @@
             scope (or (:scope item-map) (:extract/scope item-map) :channel)
             tags (normalize-tags (or (:tags item-map) (:extract/tags item-map) []))]
         (when (seq txt)
-          (let [eid (d/tempid :db.part/user)
-                ent (drop-nils
-                     {:db/id             eid
-                      :extract/id         (str (java.util.UUID/randomUUID))
-                      :extract/ts         (now-date)
-                      :extract/text       txt
-                      :extract/kind       kind
-                      :extract/confidence conf
-                      :extract/scope      scope
-                      :extract/guild-id   (some-> guild-id str)
-                      :extract/channel-id (some-> channel-id str)
-                      :extract/message-id (some-> message-id str)
-                      :extract/packet-id  (some-> packet-id str)
-                      :extract/model      (or model "openai")})
-                tag-ops (for [t tags] [:db/add eid :extract/tag t])]
-            (vec (concat [ent] tag-ops))))))))
+          (let [gid (some-> guild-id str)
+                cid (some-> channel-id str)
+                h   (extract-hash {:guild-id gid :channel-id cid :kind kind :text txt})
+                conn (ensure-conn!)
+                dbv  (d/db conn)
+                existing (find-extract-eid-by-hash dbv h)
+                now (now-date)]
+            (if existing
+              (let [have (existing-extract-tags dbv existing)
+                    missing (remove have tags)
+                    ;; Note: we don't overwrite :extract/text; we just bump seen stats + tags.
+                    ops (concat
+                         [[:db/add existing :extract/last-seen now]
+                          [:db/add existing :extract/seen-count 1]
+                          ;; keep provenance of most recent mention (optional)
+                          [:db/add existing :extract/message-id (some-> message-id str)]
+                          [:db/add existing :extract/packet-id (some-> packet-id str)]
+                          [:db/add existing :extract/model (or model "openai")]]
+                         (for [t missing] [:db/add existing :extract/tag t]))]
+                (vec ops))
 
-(defn upsert-extracts! [ctx extracts]
+              (let [eid (d/tempid :db.part/user)
+                    ent (drop-nils
+                         {:db/id             eid
+                          :extract/id         (str (java.util.UUID/randomUUID))
+                          :extract/hash       h
+                          :extract/ts         now
+                          :extract/last-seen  now
+                          :extract/seen-count 1
+                          :extract/text       txt
+                          :extract/kind       kind
+                          :extract/confidence conf
+                          :extract/scope      scope
+                          :extract/guild-id   gid
+                          :extract/channel-id cid
+                          :extract/message-id (some-> message-id str)
+                          :extract/packet-id  (some-> packet-id str)
+                          :extract/model      (or model "openai")})
+                    tag-ops (for [t tags] [:db/add eid :extract/tag t])]
+                (vec (concat [ent] tag-ops))))))))))
+
+(defn upsert-extracts!
+  "Write a vector of extract items into the DB as separate entities.
+  De-dupes by :extract/hash; repeats bump seen-count + last-seen."
+  [ctx extracts]
   (let [txdata (->> (or extracts [])
                     (map (partial extract-item->txdata ctx))
                     (remove nil?)
@@ -270,7 +333,7 @@
       true)))
 
 ;; -----------------------------------------------------------------------------
-;; TOPIC writes (Ollama backfill target)
+;; TOPICS: per-message topic tags (separate from spine)
 ;; -----------------------------------------------------------------------------
 
 (defn- normalize-topics [xs]
@@ -278,38 +341,31 @@
        (map (fn [t] (-> (str t) str/lower-case str/trim)))
        (remove str/blank?)
        distinct
+       (take 12)
        vec))
 
-(defn- eid-by-topic-message-id
-  "Return eid for a topic entity by message-id string, or nil."
-  [dbv mid]
-  (ffirst (d/q '[:find ?e :in $ ?mid :where [?e :topic/message-id ?mid]]
-               dbv (str mid))))
-
 (defn upsert-message-topics!
-  "Upsert topics for a message-id into a separate topic entity.
-  Writes :topic/topic as cardinality-many strings."
   [{:keys [message-id guild-id channel-id model topics]}]
-  (let [mid (some-> message-id str)
+  (let [conn (ensure-conn!)
+        dbv (d/db conn)
+        mid (some-> message-id str)
         model (or model "ollama")
         topics (normalize-topics topics)]
     (when (and (seq mid) (seq topics))
-      (let [conn (ensure-conn!)
-            dbv (d/db conn)
-            eid (or (eid-by-topic-message-id dbv mid) (d/tempid :db.part/user))
+      (let [eid (or (ffirst (d/q '[:find ?e :in $ ?mid :where [?e :topic/message-id ?mid]]
+                                 dbv mid))
+                    (d/tempid :db.part/user))
             ent (drop-nils {:db/id            eid
                             :topic/message-id mid
                             :topic/ts         (now-date)
                             :topic/guild-id   (some-> guild-id str)
                             :topic/channel-id (some-> channel-id str)
                             :topic/model      (str model)})
-            topic-ops (for [t topics] [:db/add eid :topic/topic t])]
-        (d/transact! conn (vec (concat [ent] topic-ops)))
+            ops (for [t topics] [:db/add eid :topic/topic t])]
+        (d/transact! conn (vec (concat [ent] ops)))
         true))))
 
-(defn topic-exists?
-  "True if a topic entity exists for message-id."
-  [mid]
+(defn topic-exists? [mid]
   (let [dbv (db)]
     (boolean (ffirst (d/q '[:find ?e :in $ ?mid :where [?e :topic/message-id ?mid]]
                           dbv (str mid))))))
