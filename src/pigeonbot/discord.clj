@@ -33,7 +33,6 @@
   (case event-type
     :ready
     (do
-      ;; best-effort: store bot user id if present in ready payload
       (when-let [bid (or (get-in event-data [:user :id])
                          (get-in event-data [:user :user :id]))]
         (swap! state assoc :bot-user-id (str bid)))
@@ -41,22 +40,24 @@
 
     :message-create
     (do
-      ;; 1) record rolling in-memory context
+      ;; rolling context (in-memory)
       (ctx/record-message! event-data)
 
-      ;; 2) persist to Datalevin (never let failures break bot)
-      (try
-        (db/upsert-message! event-data)
-        (catch Throwable t
-          (println "db/upsert-message! error:" (.getMessage t))))
+      ;; spine + derived metadata (Datalevin)
+      (try (db/upsert-message! event-data)
+           (catch Throwable t
+             (println "db/upsert-message! error:" (.getMessage t))))
+      (try (db/upsert-message-meta! event-data)
+           (catch Throwable t
+             (println "db/upsert-message-meta! error:" (.getMessage t))))
 
-      ;; 3) command routing
+      ;; command routing
       (commands/handle-message event-data)
 
-      ;; 4) passive reacts
+      ;; passive reacts
       (reacts/maybe-react! event-data)
 
-      ;; 5) vision rules
+      ;; vision rules
       (vision-reacts/maybe-react-vision! event-data))
 
     :message-reaction-add
@@ -73,25 +74,17 @@
 (defn- desired-intents
   "Choose gateway intents.
 
-  Default: minimal and stable: [:guilds :guild-messages]
+  Default: [:guilds :guild-messages]
+  Override: :discord-intents [...] in config.edn
 
-  Override via config.edn:
-    :discord-intents [:guilds :guild-messages :guild-message-reactions :message-content]
-
-  Any unsupported intents are dropped with a warning."
+  Unsupported intents are dropped."
   []
   (let [cfg (config/load-config)
         requested (or (:discord-intents cfg)
                       [:guilds :guild-messages])
         supported (supported-intents-set)
-        chosen (->> requested
-                    (map keyword)
-                    (filter supported)
-                    set)
-        dropped (->> requested
-                     (map keyword)
-                     (remove supported)
-                     vec)]
+        chosen (->> requested (map keyword) (filter supported) set)
+        dropped (->> requested (map keyword) (remove supported) vec)]
     (when (seq dropped)
       (println "WARNING: Dropping unsupported gateway intents:" dropped))
     chosen))
@@ -99,7 +92,7 @@
 (defn start-bot
   "Connect to Discord and start the event pump (blocking)."
   []
-  ;; Ensure DB is open early so we fail fast if path is wrong.
+  ;; ensure DB early
   (db/ensure-conn!)
 
   (channels/load-channels!)
