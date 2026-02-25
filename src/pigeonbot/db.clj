@@ -28,7 +28,7 @@
                           :db/fulltext true}
 
    ;; -------------------------
-   ;; META: derived annotations (do not change the spine)
+   ;; META: derived annotations (mechanical)
    ;; -------------------------
    :meta/message-id       {:db/unique :db.unique/identity
                            :db/valueType :db.type/string
@@ -43,7 +43,6 @@
                            :db/index true}
    :meta/bot?             {:db/valueType :db.type/boolean
                            :db/index true}
-
    :meta/is-command?      {:db/valueType :db.type/boolean
                            :db/index true}
    :meta/has-attachments? {:db/valueType :db.type/boolean
@@ -52,17 +51,45 @@
                            :db/index true}
    :meta/reply-to-id      {:db/valueType :db.type/string
                            :db/index true}
-
    :meta/char-count       {:db/valueType :db.type/long
                            :db/index true}
    :meta/word-count       {:db/valueType :db.type/long
                            :db/index true}
-
    :meta/mention-ids      {:db/valueType :db.type/string
                            :db/cardinality :db.cardinality/many
                            :db/index true}
    :meta/attachment-urls  {:db/valueType :db.type/string
                            :db/cardinality :db.cardinality/many
+                           :db/index true}
+
+   ;; -------------------------
+   ;; EXTRACTS: SLAP writeback (semantic memory)
+   ;; -------------------------
+   :extract/id            {:db/unique :db.unique/identity
+                           :db/valueType :db.type/string
+                           :db/index true}
+   :extract/ts            {:db/valueType :db.type/instant
+                           :db/index true}
+   :extract/text          {:db/valueType :db.type/string
+                           :db/fulltext true}
+   :extract/kind          {:db/valueType :db.type/keyword
+                           :db/index true}
+   :extract/confidence    {:db/valueType :db.type/double
+                           :db/index true}
+   :extract/tags          {:db/valueType :db.type/string
+                           :db/cardinality :db.cardinality/many
+                           :db/index true}
+   :extract/scope         {:db/valueType :db.type/keyword
+                           :db/index true}
+   :extract/guild-id      {:db/valueType :db.type/string
+                           :db/index true}
+   :extract/channel-id    {:db/valueType :db.type/string
+                           :db/index true}
+   :extract/message-id    {:db/valueType :db.type/string
+                           :db/index true}
+   :extract/packet-id     {:db/valueType :db.type/string
+                           :db/index true}
+   :extract/model         {:db/valueType :db.type/string
                            :db/index true}})
 
 (defonce ^:private conn* (atom nil))
@@ -147,11 +174,10 @@
     true))
 
 ;; -----------------------------------------------------------------------------
-;; META writes (derived)
+;; META writes
 ;; -----------------------------------------------------------------------------
 
 (defn- message-reference-id
-  "Get the replied-to message id if present."
   [msg]
   (or (get-in msg [:message_reference :message_id])
       (get-in msg [:message_reference :message-id])
@@ -175,7 +201,7 @@
 
 (defn- attachment-urls [msg]
   (->> (or (:attachments msg) [])
-       (map (fn [a] (or (:url a) (:proxy_url a) (:proxy-url a) (:proxy-url a))))
+       (map (fn [a] (or (:url a) (:proxy_url a) (:proxy-url a))))
        (map (fn [u] (some-> u str str/trim)))
        (remove str/blank?)
        distinct
@@ -183,14 +209,10 @@
 
 (defn- word-count [s]
   (let [s (-> (or s "") (str/replace #"\s+" " ") str/trim)]
-    (if (str/blank? s)
-      0
-      (count (str/split s #" ")))))
-
+    (if (str/blank? s) 0 (count (str/split s #" ")))))
 
 (defn message-meta->tx
-  "Derived metadata tx for a Discord message.
-  Stored in separate entity keyed by :meta/message-id (unique)."
+  "Derived metadata tx for a Discord message."
   [{:keys [id timestamp guild-id channel-id content] :as msg}]
   (let [{:keys [author-id bot?]} (normalize-author msg)
         mid (some-> id str)
@@ -201,44 +223,102 @@
         a-urls (attachment-urls msg)]
     (when (seq mid)
       (drop-nils
-       (cond-> {:db/id                (d/tempid :db.part/user)
-                :meta/message-id      mid
-                :meta/ts              ts
-                :meta/guild-id        (some-> guild-id str)
-                :meta/channel-id      (some-> channel-id str)
-                :meta/author-id       (or author-id "")
-                :meta/bot?            bot?
-                :meta/is-command?     (looks-like-command? content)
+       (cond-> {:db/id                 (d/tempid :db.part/user)
+                :meta/message-id       mid
+                :meta/ts               ts
+                :meta/guild-id         (some-> guild-id str)
+                :meta/channel-id       (some-> channel-id str)
+                :meta/author-id        (or author-id "")
+                :meta/bot?             bot?
+                :meta/is-command?      (looks-like-command? content)
                 :meta/has-attachments? (boolean (seq a-urls))
-                :meta/has-links?      (looks-like-link? content)
-                :meta/reply-to-id     (some-> (message-reference-id msg) str)
-                :meta/char-count      (long (count content))
-                :meta/word-count      (long (word-count content))}
+                :meta/has-links?       (looks-like-link? content)
+                :meta/reply-to-id      (some-> (message-reference-id msg) str)
+                :meta/char-count       (long (count content))
+                :meta/word-count       (long (word-count content))}
          (seq m-ids) (assoc :meta/mention-ids m-ids)
          (seq a-urls) (assoc :meta/attachment-urls a-urls))))))
 
 (defn upsert-message-meta!
-  "Idempotently store derived metadata for a message (by :meta/message-id)."
   [msg]
   (when-let [tx (message-meta->tx msg)]
     (d/transact! (ensure-conn!) [tx])
     true))
 
 ;; -----------------------------------------------------------------------------
+;; EXTRACT writes
+;; -----------------------------------------------------------------------------
+
+(defn- normalize-tags
+  [xs]
+  (->> (or xs [])
+       (map (fn [t] (-> (str t) str/lower-case str/trim)))
+       (remove str/blank?)
+       distinct
+       vec))
+
+(defn- now-date [] (java.util.Date.))
+
+(defn extract-item->tx
+  "Convert one extract item to a tx map.
+  Supports:
+  - string  -> {:extract/text \"...\" :extract/kind :note}
+  - map     -> uses keys when present
+  Context params supply scope + provenance."
+  [ctx item]
+  (let [{:keys [guild-id channel-id message-id packet-id model]} ctx
+        base {:db/id             (d/tempid :db.part/user)
+              :extract/id         (str (java.util.UUID/randomUUID))
+              :extract/ts         (now-date)
+              :extract/guild-id   (some-> guild-id str)
+              :extract/channel-id (some-> channel-id str)
+              :extract/message-id (some-> message-id str)
+              :extract/packet-id  (some-> packet-id str)
+              :extract/model      (or model "openai")}
+        item-map (cond
+                   (string? item) {:text item
+                                   :kind :note
+                                   :confidence 0.75
+                                   :tags []}
+                   (map? item) item
+                   :else nil)]
+    (when item-map
+      (let [txt (some-> (or (:text item-map) (:extract/text item-map)) str str/trim)
+            kind (or (:kind item-map) (:extract/kind item-map) :note)
+            conf (double (or (:confidence item-map) (:extract/confidence item-map) 0.75))
+            scope (or (:scope item-map) (:extract/scope item-map) :channel)
+            tags (normalize-tags (or (:tags item-map) (:extract/tags item-map) []))]
+        (when (seq txt)
+          (drop-nils
+           (cond-> (assoc base
+                          :extract/text txt
+                          :extract/kind kind
+                          :extract/confidence conf
+                          :extract/scope scope)
+             (seq tags) (assoc :extract/tags tags))))))))
+
+(defn upsert-extracts!
+  "Write a vector of extract items into the DB as separate entities.
+  We don't de-dupe yet; you can add later."
+  [ctx extracts]
+  (let [extracts (or extracts [])
+        txs (->> extracts
+                 (map (partial extract-item->tx ctx))
+                 (remove nil?)
+                 vec)]
+    (when (seq txs)
+      (d/transact! (ensure-conn!) txs)
+      (count txs))))
+
+;; -----------------------------------------------------------------------------
 ;; Queries / helpers
 ;; -----------------------------------------------------------------------------
 
-(defn count-messages
-  "Total message count (quick sanity check)."
-  []
+(defn count-messages []
   (let [dbv (db)]
-    (ffirst (d/q '[:find (count ?e)
-                   :where [?e :message/id]]
-                 dbv))))
+    (ffirst (d/q '[:find (count ?e) :where [?e :message/id]] dbv))))
 
 (defn fulltext
-  "Full-text search over :message/content.
-  Returns sequence of [e a v] datoms."
   ([query] (fulltext query {}))
   ([query opts]
    (d/q '[:find ?e ?a ?v

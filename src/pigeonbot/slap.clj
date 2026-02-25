@@ -30,7 +30,6 @@
     :else {}))
 
 (defn- extract-output-text
-  "Extract assistant text from OpenAI Responses API result."
   [resp-body]
   (let [m (decode-body resp-body)]
     (or
@@ -57,7 +56,6 @@
       (str resp-body))))
 
 (defn- openai-edn!
-  "Call OpenAI, forcing EDN-only output."
   [system-lines user-text]
   (let [{:keys [base-url api-key model timeout]} (openai-cfg)
         _ (when-not (and (string? api-key) (seq api-key))
@@ -75,10 +73,8 @@
     (cond
       error
       (throw (ex-info "OpenAI request failed" {:error (str error) :endpoint ep}))
-
       (or (nil? status) (not (<= 200 status 299)))
       (throw (ex-info "OpenAI returned non-2xx" {:status status :body body :endpoint ep}))
-
       :else
       (-> (extract-output-text body) str str/trim))))
 
@@ -91,9 +87,7 @@
 
 (defn- new-id [] (str (java.util.UUID/randomUUID)))
 
-(defn- iso-or-str
-  "Render timestamps nicely. Datalevin stores instants as java.util.Date in our setup."
-  [x]
+(defn- iso-or-str [x]
   (cond
     (instance? java.util.Date x) (.toString (.toInstant ^java.util.Date x))
     :else (str x)))
@@ -128,9 +122,7 @@
    "- Keep :answer concise (1-3 sentences unless asked for more)."
    "- Never include secrets."])
 
-(defn- persona-instructions
-  "Promote pigeonbot persona into system-level steering so the sass sticks."
-  []
+(defn- persona-instructions []
   (let [cfg (config/load-config)
         p (some-> (:persona-prompt cfg) str str/trim)]
     (cond-> (vec (slap-system-instructions))
@@ -139,7 +131,7 @@
              "PERSONA (obey this voice guide):"
              p
              ""
-             "Style reminder: be wry, haunted-cozy, slightly sassy; concise; avoid generic assistant tone."]))))
+             "Style reminder: be playful, sassy pigeon entity; concise; avoid corporate assistant tone."]))))
 
 (defn- safe-edn-read [s]
   (try
@@ -169,9 +161,7 @@
     (throw (ex-info "SLAP: :meta must be map" {:meta (:meta resp)})))
   resp)
 
-(defn- bot-persona
-  "Persona block for :identity/bot. Configurable, with sane defaults."
-  []
+(defn- bot-persona []
   (let [cfg (config/load-config)]
     {:bot/name (or (:bot-name cfg) "pigeonbot")
      :bot/version (or (:bot-version cfg) "dev")
@@ -184,9 +174,7 @@
 ;; Datalevin utilities (Mode A: channel-first scoping)
 ;; -----------------------------------------------------------------------------
 
-(defn- pull-message
-  "Pull a compact message map by eid."
-  [dbv eid]
+(defn- pull-message [dbv eid]
   (try
     (dlv/pull dbv
               [:message/id
@@ -200,18 +188,12 @@
               eid)
     (catch Throwable _ nil)))
 
-(defn- same-channel?
-  "Mode A: only same channel counts as 'in scope'."
-  [msg m]
+(defn- same-channel? [msg m]
   (let [cid (some-> (:channel-id msg) str)
         mcid (some-> (:message/channel-id m) str)]
-    (if (seq cid)
-      (= cid mcid)
-      true)))
+    (if (seq cid) (= cid mcid) true)))
 
-(defn- recent-messages-from-db
-  "Fetch last N messages from the SAME CHANNEL for temporal context (Mode A)."
-  [msg n]
+(defn- recent-messages-from-db [msg n]
   (let [dbv (db/db)
         cid (some-> (:channel-id msg) str)]
     (if-not (seq cid)
@@ -235,12 +217,7 @@
                      :content (str txt)}))
              vec)))))
 
-(defn- preseed-evidence
-  "Initial 'slap spice' from Datalevin (Mode A).
-  - Run FTS on the question
-  - Pull top N messages
-  - FILTER to same channel only"
-  [msg question]
+(defn- preseed-evidence [msg question]
   (let [cfg (config/load-config)
         limit (long (or (:slap-preseed-limit cfg) 25))
         q (-> (or question "") str str/trim)]
@@ -262,11 +239,10 @@
           [])))))
 
 ;; -----------------------------------------------------------------------------
-;; Packet builder (Mode A temporal + persona)
+;; Packet builder
 ;; -----------------------------------------------------------------------------
 
-(defn- build-request
-  [{:keys [packet-id conversation-id depth msg evidence]}]
+(defn- build-request [{:keys [packet-id conversation-id depth msg evidence]}]
   (let [{:keys [channel-id guild-id id content author]} msg
         author-id (some-> (or (:id author) (get-in author [:user :id])) str)
         author-name (or (:global_name author)
@@ -297,12 +273,10 @@
      :task {:goal "Answer the user's message using available evidence. If insufficient, request query-back."}}))
 
 ;; -----------------------------------------------------------------------------
-;; Query-back tool: :datalevin/fts (Mode A scoping)
+;; Query-back tool: :datalevin/fts
 ;; -----------------------------------------------------------------------------
 
-(defn- fts-evidence
-  "Execute a single :datalevin/fts query-back item (Mode A: same channel only)."
-  [msg item]
+(defn- fts-evidence [msg item]
   (let [qid (or (:query/id item) (new-id))
         purpose (or (:purpose item) "")
         q (or (get-in item [:query :fts]) "")
@@ -321,9 +295,7 @@
      :fts q
      :rows rows}))
 
-(defn- run-query-back
-  "Execute :query-back items. Returns vector of evidence maps."
-  [msg query-back]
+(defn- run-query-back [msg query-back]
   (->> (or query-back [])
        (sort-by (fn [q] (or (:priority q) 999)))
        (mapcat
@@ -337,9 +309,7 @@
 ;; Public API
 ;; -----------------------------------------------------------------------------
 
-(defn build-first-packet
-  "REPL helper: show the exact first request packet (with preseed + temporal)."
-  [msg]
+(defn build-first-packet [msg]
   (db/ensure-conn!)
   (let [packet-id (new-id)
         conversation-id (new-id)
@@ -358,10 +328,16 @@
   ([msg {:keys [max-depth max-queries]
          :or {max-depth 3 max-queries 8}}]
    (db/ensure-conn!)
-   (let [packet-id (new-id)
+   (let [{:keys [model]} (openai-cfg)
+         packet-id (new-id)
          conversation-id (new-id)
          question (str (or (:content msg) ""))
-         seed (preseed-evidence msg question)]
+         seed (preseed-evidence msg question)
+         ctxx {:guild-id (:guild-id msg)
+               :channel-id (:channel-id msg)
+               :message-id (:id msg)
+               :packet-id packet-id
+               :model (str model)}]
      (loop [depth 0
             evidence (vec seed)
             queries-used 0]
@@ -375,6 +351,13 @@
              qb (vec (or (:query-back resp) []))
              resp (assoc resp :query-back qb)
              sufficient? (true? (:sufficient? resp))]
+
+         ;; write extracts every turn (best-effort)
+         (try
+           (db/upsert-extracts! ctxx (:extract resp))
+           (catch Throwable t
+             (println "extract write error:" (.getMessage t))))
+
          (cond
            sufficient?
            {:answer (str (:answer resp)) :resp resp :depth depth}
