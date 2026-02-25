@@ -76,9 +76,6 @@
                            :db/index true}
    :extract/confidence    {:db/valueType :db.type/double
                            :db/index true}
-   :extract/tags          {:db/valueType :db.type/string
-                           :db/cardinality :db.cardinality/many
-                           :db/index true}
    :extract/scope         {:db/valueType :db.type/keyword
                            :db/index true}
    :extract/guild-id      {:db/valueType :db.type/string
@@ -90,6 +87,15 @@
    :extract/packet-id     {:db/valueType :db.type/string
                            :db/index true}
    :extract/model         {:db/valueType :db.type/string
+                           :db/index true}
+
+   ;; NEW: good tag storage (one datom per tag)
+   :extract/tag           {:db/valueType :db.type/string
+                           :db/cardinality :db.cardinality/many
+                           :db/index true}
+
+   ;; Legacy: keep around for migration reads (do not write going forward)
+   :extract/tags          {:db/valueType :db.type/string
                            :db/index true}})
 
 (defonce ^:private conn* (atom nil))
@@ -138,6 +144,8 @@
   "Datalevin cannot store nil attribute values; remove them."
   [m]
   (into {} (remove (comp nil? val)) m))
+
+(defn- now-date [] (java.util.Date.))
 
 ;; -----------------------------------------------------------------------------
 ;; SPINE writes
@@ -246,7 +254,7 @@
     true))
 
 ;; -----------------------------------------------------------------------------
-;; EXTRACT writes
+;; EXTRACT writes (with correct tag storage)
 ;; -----------------------------------------------------------------------------
 
 (defn- normalize-tags
@@ -257,24 +265,14 @@
        distinct
        vec))
 
-(defn- now-date [] (java.util.Date.))
-
-(defn extract-item->tx
-  "Convert one extract item to a tx map.
-  Supports:
-  - string  -> {:extract/text \"...\" :extract/kind :note}
-  - map     -> uses keys when present
-  Context params supply scope + provenance."
+(defn extract-item->txdata
+  "Convert one extract item into tx-data.
+  Returns a vector of tx ops:
+    - entity map
+    - [:db/add <eid> :extract/tag \"...\"] for each tag
+  Accepts strings or maps with :text (or :content)."
   [ctx item]
   (let [{:keys [guild-id channel-id message-id packet-id model]} ctx
-        base {:db/id             (d/tempid :db.part/user)
-              :extract/id         (str (java.util.UUID/randomUUID))
-              :extract/ts         (now-date)
-              :extract/guild-id   (some-> guild-id str)
-              :extract/channel-id (some-> channel-id str)
-              :extract/message-id (some-> message-id str)
-              :extract/packet-id  (some-> packet-id str)
-              :extract/model      (or model "openai")}
         item-map (cond
                    (string? item) {:text item
                                    :kind :note
@@ -283,32 +281,48 @@
                    (map? item) item
                    :else nil)]
     (when item-map
-      (let [txt (some-> (or (:text item-map) (:extract/text item-map)) str str/trim)
+      (let [txt (some-> (or (:text item-map)
+                            (:content item-map)
+                            (:extract/text item-map)
+                            (:extract/content item-map))
+                        str
+                        str/trim)
             kind (or (:kind item-map) (:extract/kind item-map) :note)
             conf (double (or (:confidence item-map) (:extract/confidence item-map) 0.75))
             scope (or (:scope item-map) (:extract/scope item-map) :channel)
             tags (normalize-tags (or (:tags item-map) (:extract/tags item-map) []))]
         (when (seq txt)
-          (drop-nils
-           (cond-> (assoc base
-                          :extract/text txt
-                          :extract/kind kind
-                          :extract/confidence conf
-                          :extract/scope scope)
-             (seq tags) (assoc :extract/tags tags))))))))
+          (let [eid (d/tempid :db.part/user)
+                ent (drop-nils
+                     {:db/id             eid
+                      :extract/id         (str (java.util.UUID/randomUUID))
+                      :extract/ts         (now-date)
+                      :extract/text       txt
+                      :extract/kind       kind
+                      :extract/confidence conf
+                      :extract/scope      scope
+                      :extract/guild-id   (some-> guild-id str)
+                      :extract/channel-id (some-> channel-id str)
+                      :extract/message-id (some-> message-id str)
+                      :extract/packet-id  (some-> packet-id str)
+                      :extract/model      (or model "openai")})
+                tag-ops (for [t tags]
+                          [:db/add eid :extract/tag t])]
+            (vec (concat [ent] tag-ops))))))))
 
 (defn upsert-extracts!
   "Write a vector of extract items into the DB as separate entities.
-  We don't de-dupe yet; you can add later."
+  Correct tag storage: writes :extract/tag as many datoms."
   [ctx extracts]
   (let [extracts (or extracts [])
-        txs (->> extracts
-                 (map (partial extract-item->tx ctx))
-                 (remove nil?)
-                 vec)]
-    (when (seq txs)
-      (d/transact! (ensure-conn!) txs)
-      (count txs))))
+        txdata (->> extracts
+                    (map (partial extract-item->txdata ctx))
+                    (remove nil?)
+                    (mapcat identity)
+                    vec)]
+    (when (seq txdata)
+      (d/transact! (ensure-conn!) txdata)
+      true)))
 
 ;; -----------------------------------------------------------------------------
 ;; Queries / helpers
