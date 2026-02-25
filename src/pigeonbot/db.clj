@@ -63,52 +63,8 @@
      :bot?        bot?}))
 
 (defn message->tx
-  "Convert a Discord :message-create payload into a Datalevin entity map."
-  [{:keys [id timestamp guild-id channel-id channel-type content] :as msg}]
-  (let [{:keys [author-name author-id bot?]} (normalize-author msg)
-        mid (some-> id str)
-        ts  (or (parse-instant (str timestamp))
-                ;; fallback: now
-                (java.time.Instant/now))
-        content (-> (or content "")
-                    (str/replace #"\u0000" "")   ;; defensive
-                    (str/trim))]
-    (when (seq mid)
-      {:db/id               [:message/id mid]
-       :message/id          mid
-       :message/ts          ts
-       :message/guild-id    (some-> guild-id str)
-       :message/channel-id  (some-> channel-id str)
-       :message/channel-type (when channel-type (long channel-type))
-       :message/author-id   (or author-id "")
-       :message/author-name author-name
-       :message/bot?        bot?
-       :message/content     content})))
+  "Convert a Discord :message-create payload into a Datalevin entity map.
 
-(defn upsert-message!
-  "Idempotently store a message in Datalevin (by :message/id)."
-  [msg]
-  (when-let [tx (message->tx msg)]
-    (let [conn (ensure-conn!)]
-      (d/transact! conn [tx])
-      true)))
-
-(defn db []
-  (d/db (ensure-conn!)))
-
-(defn count-messages
-  "Total message count (quick sanity check)."
-  []
-  (let [dbv (db)]
-    (count (d/q '[:find ?e :where [?e :message/id]] dbv))))
-
-(defn fulltext
-  "Full-text search over :message/content.
-  Returns sequence of [e a v] datoms ordered by relevance."
-  ([query] (fulltext query {}))
-  ([query opts]
-   ;; Datalevin provides `fulltext` query fn.  [oai_citation:4‡cljdoc.org](https://cljdoc.org/d/datalevin/datalevin/0.10.3/doc/search-engine?utm_source=chatgpt.com)
-   (d/q '[:find ?e ?a ?v
-          :in $ ?q ?opts
-          :where [(fulltext $ ?q ?opts) [[?e ?a ?v]]]]
-        (db) query opts)))
+  Important Datalevin note:
+  - Do NOT use lookup refs like [:message/id \"...\"] in :db/id inside map tx.
+  - Instead, use a tempid and rely on :message/id being :db.unique/
