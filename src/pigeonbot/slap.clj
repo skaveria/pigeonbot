@@ -515,12 +515,7 @@
 ;; -----------------------------------------------------------------------------
 
 (defn build-first-packet
-  "REPL helper: show the exact first request packet (with evidence seed).
-
-  Global-default behavior:
-  - preseed-evidence searches guild-wide (if :guild-id present), else falls back to channel-only.
-  - related-extract-evidence is also guild-wide (same guild only).
-  - repo-preseed-evidence searches indexed repo files (repo-only)."
+  "REPL helper: show the exact first request packet (with evidence seed)."
   [msg]
   (db/ensure-conn!)
   (let [packet-id (new-id)
@@ -535,6 +530,7 @@
                     :msg msg
                     :evidence seed})))
 
+
 (defn run-slap!
   "Run SLAP loop for a discord message map.
   Returns {:answer \"...\" :resp <full slap response> :depth n}."
@@ -547,7 +543,8 @@
          conversation-id (new-id)
          question (str (or (:content msg) ""))
          seed (vec (concat (preseed-evidence msg question)
-                           (related-extract-evidence msg question)))
+                           (related-extract-evidence msg question)
+                           (repo-preseed-evidence question)))
          write-ctx {:guild-id (:guild-id msg)
                     :channel-id (:channel-id msg)
                     :message-id (:id msg)
