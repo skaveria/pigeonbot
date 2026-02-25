@@ -87,7 +87,7 @@
   Context params supply scope + provenance."
   [ctx item]
   (let [{:keys [guild-id channel-id message-id packet-id model]} ctx
-        base {:db/id             (d/tempid :db.part/user)
+        base {:db/id             (dlv/tempid :db.part/user)
               :extract/id         (str (java.util.UUID/randomUUID))
               :extract/ts         (now-date)
               :extract/guild-id   (some-> guild-id str)
