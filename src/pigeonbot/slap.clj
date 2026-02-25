@@ -91,6 +91,13 @@
 
 (defn- new-id [] (str (java.util.UUID/randomUUID)))
 
+(defn- iso-or-str
+  "Render timestamps nicely. Datalevin stores instants as java.util.Date in our setup."
+  [x]
+  (cond
+    (instance? java.util.Date x) (.toInstant ^java.util.Date x) ;; prints like 2026-...
+    :else (str x)))
+
 (defn- slap-system-instructions []
   ["You are a SLAP responder."
    "You MUST output EDN only. Do not output any prose outside EDN."
@@ -98,8 +105,13 @@
    "  :slap/version :packet/id :sufficient? :answer :extract :query-back :meta"
    "Use :slap/version \"0.1\"."
    ""
-   "Evidence:"
-   "- You may be given :knowledge {:evidence [...]}, containing chat messages."
+   "IMPORTANT OUTPUT SHAPE:"
+   "- :extract must be a vector (possibly empty)."
+   "- :query-back must be a vector (possibly empty), never nil."
+   "- :meta must be a map (possibly empty)."
+   ""
+   "Evidence usage:"
+   "- You may be given :knowledge {:evidence [...]}, containing chat messages from Datalevin."
    "- Prefer grounding your answer in those messages."
    "- If evidence is missing or insufficient, set :sufficient? false and request :query-back."
    ""
@@ -107,6 +119,9 @@
    "- ONLY use tool :datalevin/fts."
    "- Each query-back item should look like:"
    "{:query/id \"q1\" :tool :datalevin/fts :query {:fts \"...\"} :expected {:limit 10} :purpose \"...\" :priority 1}"
+   ""
+   "Persona:"
+   "- You will be given :identity/bot persona details. Follow that voice."
    ""
    "Style:"
    "- Keep :answer concise (1-3 sentences unless asked for more)."
@@ -132,39 +147,38 @@
   (doseq [k [:sufficient? :answer :extract :query-back :meta]]
     (when-not (contains? resp k)
       (throw (ex-info "SLAP: missing key" {:missing k :resp resp}))))
+  (when-not (vector? (:extract resp))
+    (throw (ex-info "SLAP: :extract must be vector" {:extract (:extract resp)})))
+  ;; tolerate nil from model but normalize later; still warn via validation error if you want strict:
+  (when-not (or (nil? (:query-back resp)) (vector? (:query-back resp)))
+    (throw (ex-info "SLAP: :query-back must be vector or nil" {:query-back (:query-back resp)})))
+  (when-not (map? (:meta resp))
+    (throw (ex-info "SLAP: :meta must be map" {:meta (:meta resp)})))
   resp)
 
-(defn- build-request
-  [{:keys [packet-id conversation-id depth msg evidence]}]
-  (let [{:keys [channel-id guild-id id content author]} msg
-        author-id (some-> (or (:id author) (get-in author [:user :id])) str)
-        author-name (or (:global_name author)
-                        (:username author)
-                        (get-in author [:user :username])
-                        "unknown")
-        recent (ctx/context-text msg)]
-    {:slap/version "0.1"
-     :packet/id packet-id
-     :conversation/id (or conversation-id packet-id)
-     :depth depth
-     :identity {:actor {:platform :discord
-                        :user/id author-id
-                        :user/name author-name}
-                :scope {:guild/id (some-> guild-id str)
-                        :channel/id (some-> channel-id str)}}
-     :temporal {:now (now-iso)
-                :recent/messages [{:message/id (some-> id str)
-                                   :ts (now-iso)
-                                   :author/id author-id
-                                   :author/name author-name
-                                   :content (str (or content ""))}]
-                :recent/context recent}
-     :knowledge {:evidence (vec evidence)}
-     :task {:goal "Answer the user's message using available evidence. If insufficient, request query-back."}}))
+(defn- bot-persona
+  "Persona block for :identity/bot. Configurable, with sane defaults."
+  []
+  (let [cfg (config/load-config)]
+    {:bot/name (or (:bot-name cfg) "pigeonbot")
+     :bot/version (or (:bot-version cfg) "dev")
+     :persona/id (or (:persona-id cfg) :pigeonbot/haunted-cozy)
+     :persona/style (or (:persona-style cfg) #{:cozy :wry :haunted :concise})
+     :persona/voice {:typing-indicator? true}
+     ;; Optional: you can set this to your Gef/pigeonbot voice prompt
+     :persona/prompt (:persona-prompt cfg)}))
 
-;; -----------------------------------------------------------------------------
-;; Datalevin utilities
-;; -----------------------------------------------------------------------------
+(defn- scope-match?
+  "Keep evidence scoped. Prefer guild scope if msg has guild-id, otherwise channel scope."
+  [msg m]
+  (let [gid (some-> (:guild-id msg) str)
+        cid (some-> (:channel-id msg) str)
+        mgid (some-> (:message/guild-id m) str)
+        mcid (some-> (:message/channel-id m) str)]
+    (cond
+      (seq gid) (= gid mgid)
+      (seq cid) (= cid mcid)
+      :else true)))
 
 (defn- pull-message
   "Pull a compact message map by eid."
@@ -182,17 +196,48 @@
               eid)
     (catch Throwable _ nil)))
 
-(defn- scope-match?
-  "Keep evidence scoped. Prefer guild scope if msg has guild-id, otherwise channel scope."
-  [msg m]
-  (let [gid (some-> (:guild-id msg) str)
+(defn- recent-messages-from-db
+  "Fetch last N messages in this scope from Datalevin for temporal context."
+  [msg n]
+  (let [dbv (db/db)
+        gid (some-> (:guild-id msg) str)
         cid (some-> (:channel-id msg) str)
-        mgid (some-> (:message/guild-id m) str)
-        mcid (some-> (:message/channel-id m) str)]
-    (cond
-      (seq gid) (= gid mgid)
-      (seq cid) (= cid mcid)
-      :else true)))
+        rows (cond
+               (seq gid)
+               (dlv/q '[:find ?ts ?author ?txt ?mid ?chid
+                        :in $ ?gid
+                        :where
+                        [?e :message/guild-id ?gid]
+                        [?e :message/ts ?ts]
+                        [?e :message/author-name ?author]
+                        [?e :message/content ?txt]
+                        [?e :message/id ?mid]
+                        [?e :message/channel-id ?chid]]
+                      dbv gid)
+
+               (seq cid)
+               (dlv/q '[:find ?ts ?author ?txt ?mid
+                        :in $ ?cid
+                        :where
+                        [?e :message/channel-id ?cid]
+                        [?e :message/ts ?ts]
+                        [?e :message/author-name ?author]
+                        [?e :message/content ?txt]
+                        [?e :message/id ?mid]]
+                      dbv cid)
+
+               :else [])]
+    (->> rows
+         (sort-by first)
+         (take-last (long n))
+         (map (fn [row]
+                (let [[ts author txt mid chid] row]
+                  (cond-> {:message/id (str mid)
+                           :ts (str (iso-or-str ts))
+                           :author/name (str author)
+                           :content (str txt)}
+                    chid (assoc :channel/id (str chid))))))
+         vec)))
 
 (defn- preseed-evidence
   "Initial 'slap spice' from Datalevin.
@@ -201,7 +246,6 @@
   - Filter to same guild/channel scope"
   [msg question]
   (let [cfg (config/load-config)
-        ;; tuning knobs (safe defaults)
         limit (long (or (:slap-preseed-limit cfg) 25))
         q (-> (or question "") str str/trim)]
     (if (str/blank? q)
@@ -221,9 +265,41 @@
             :rows rows}]
           [])))))
 
-;; -----------------------------------------------------------------------------
-;; Query-back tool: :datalevin/fts
-;; -----------------------------------------------------------------------------
+(defn- build-request
+  [{:keys [packet-id conversation-id depth msg evidence]}]
+  (let [{:keys [channel-id guild-id id content author]} msg
+        author-id (some-> (or (:id author) (get-in author [:user :id])) str)
+        author-name (or (:global_name author)
+                        (:username author)
+                        (get-in author [:user :username])
+                        "unknown")
+        recent-context (ctx/context-text msg)
+        recent-db (recent-messages-from-db msg (long (or (:slap-recent-limit (config/load-config)) 30)))]
+    {:slap/version "0.1"
+     :packet/id packet-id
+     :conversation/id (or conversation-id packet-id)
+     :depth depth
+
+     ;; Identity layer includes both actor and bot persona
+     :identity {:actor {:platform :discord
+                        :user/id author-id
+                        :user/name author-name}
+                :bot (bot-persona)
+                :scope {:guild/id (some-> guild-id str)
+                        :channel/id (some-> channel-id str)}}
+
+     ;; Temporal is now richer + explicit
+     :temporal {:now (now-iso)
+                :recent/messages [{:message/id (some-> id str)
+                                   :ts (now-iso)
+                                   :author/id author-id
+                                   :author/name author-name
+                                   :content (str (or content ""))}]
+                :recent/context recent-context
+                :recent/datalevin recent-db}
+
+     :knowledge {:evidence (vec evidence)}
+     :task {:goal "Answer the user's message using available evidence. If insufficient, request query-back."}}))
 
 (defn- fts-evidence
   "Execute a single :datalevin/fts query-back item."
@@ -259,8 +335,22 @@
        vec))
 
 ;; -----------------------------------------------------------------------------
-;; Orchestrator
+;; Public API
 ;; -----------------------------------------------------------------------------
+
+(defn build-first-packet
+  "REPL helper: show the exact first request packet (with preseed + temporal)."
+  [msg]
+  (db/ensure-conn!)
+  (let [packet-id (new-id)
+        conversation-id (new-id)
+        question (str (or (:content msg) ""))
+        seed (preseed-evidence msg question)]
+    (build-request {:packet-id packet-id
+                    :conversation-id conversation-id
+                    :depth 0
+                    :msg msg
+                    :evidence seed})))
 
 (defn run-slap!
   "Run SLAP loop for a discord message map.
@@ -271,8 +361,7 @@
    (db/ensure-conn!)
    (let [packet-id (new-id)
          conversation-id (new-id)
-         question (str (or (:content msg) ""))  ;; for preseed
-         ;; The spice: seed evidence from Datalevin BEFORE first OpenAI call.
+         question (str (or (:content msg) ""))
          seed (preseed-evidence msg question)]
      (loop [depth 0
             evidence (vec seed)
@@ -284,8 +373,10 @@
                                  :evidence evidence})
              raw (openai-edn! (slap-system-instructions) (pr-str req))
              resp (-> raw safe-edn-read (validate-response! packet-id))
-             sufficient? (true? (:sufficient? resp))
-             qb (vec (or (:query-back resp) []))]
+             ;; normalize query-back to a vector even if model returns nil
+             qb (vec (or (:query-back resp) []))
+             resp (assoc resp :query-back qb)
+             sufficient? (true? (:sufficient? resp))]
          (cond
            sufficient?
            {:answer (str (:answer resp)) :resp resp :depth depth}
