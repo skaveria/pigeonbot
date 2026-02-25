@@ -114,7 +114,7 @@
 "  - :text (string)"
 "  - :kind (keyword, e.g. :note/:fact/:decision/:todo)"
 "  - :confidence (0.0–1.0)"
-"  - :tags (vector of 3–8 strings)"
+"  - :tags (vector of 5–10 strings)"
 "- Tag rules:"
 "  - lowercase"
 "  - short tokens, no spaces (use hyphen if needed)"
