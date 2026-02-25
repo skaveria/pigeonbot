@@ -80,9 +80,7 @@
       (throw (ex-info "OpenAI returned non-2xx" {:status status :body body :endpoint ep}))
 
       :else
-      (-> (extract-output-text body)
-          str
-          str/trim))))
+      (-> (extract-output-text body) str str/trim))))
 
 ;; -----------------------------------------------------------------------------
 ;; SLAP helpers
@@ -177,15 +175,12 @@
     (catch Throwable _ nil)))
 
 (defn- fts-evidence
-  "Execute an fts query and return an evidence map."
-  [{:keys [query/id purpose query expected] :as item}]
-  (let [q (or (get-in item [:query :fts])
-              (get-in item [:query :query :fts]) ;; tolerate nesting
-              (get-in query [:fts])
-              "")
-        limit (or (get-in item [:expected :limit])
-                  (get-in expected [:limit])
-                  10)
+  "Execute a single :datalevin/fts query-back item."
+  [item]
+  (let [qid (or (:query/id item) (new-id))
+        purpose (or (:purpose item) "")
+        q (or (get-in item [:query :fts]) "")
+        limit (or (get-in item [:expected :limit]) 10)
         hits (take limit (db/fulltext q))
         eids (->> hits (map first) distinct vec)
         dbv (db/db)
@@ -194,8 +189,8 @@
                   (remove nil?)
                   vec)]
     {:evidence/type :datalevin/fts
-     :query/id (or query/id (new-id))
-     :purpose (or purpose "")
+     :query/id qid
+     :purpose purpose
      :fts q
      :rows rows}))
 
@@ -208,7 +203,6 @@
         (fn [q]
           (case (:tool q)
             :datalevin/fts [(fts-evidence q)]
-            ;; ignore unknown tools for now
             [])))
        vec))
 
@@ -218,7 +212,6 @@
 
 (defn run-slap!
   "Run SLAP loop for a discord message map.
-
   Returns {:answer \"...\" :resp <full slap response> :depth n}."
   ([msg] (run-slap! msg {}))
   ([msg {:keys [max-depth max-queries]
@@ -240,31 +233,21 @@
              qb (vec (or (:query-back resp) []))]
          (cond
            sufficient?
-           {:answer (str (:answer resp))
-            :resp resp
-            :depth depth}
+           {:answer (str (:answer resp)) :resp resp :depth depth}
 
            (>= depth max-depth)
-           {:answer (str (:answer resp))
-            :resp resp
-            :depth depth}
+           {:answer (str (:answer resp)) :resp resp :depth depth}
 
            (>= queries-used max-queries)
-           {:answer (str (:answer resp))
-            :resp resp
-            :depth depth}
+           {:answer (str (:answer resp)) :resp resp :depth depth}
 
            (empty? qb)
-           {:answer (str (:answer resp))
-            :resp resp
-            :depth depth}
+           {:answer (str (:answer resp)) :resp resp :depth depth}
 
            :else
            (let [new-evidence (run-query-back qb)]
              (if (empty? new-evidence)
-               {:answer (str (:answer resp))
-                :resp resp
-                :depth depth}
+               {:answer (str (:answer resp)) :resp resp :depth depth}
                (recur (inc depth)
                       (into evidence new-evidence)
                       (+ queries-used (count qb)))))))))))
