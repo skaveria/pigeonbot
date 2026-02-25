@@ -230,6 +230,23 @@
               (take limit)
               vec))))))
 
+(defn repo-manifest
+  "Return a lightweight manifest of indexed repo files."
+  ([] (repo-manifest 60))
+  ([limit]
+   (let [dbv (db)]
+     (->> (d/q '[:find ?path ?bytes ?kind ?ts
+                 :where
+                 [?e :repo/path ?path]
+                 [?e :repo/bytes ?bytes]
+                 [?e :repo/kind ?kind]
+                 [?e :repo/ts ?ts]]
+               dbv)
+          (sort-by (fn [[path _ _ _]] path))
+          (take (long limit))
+          (map (fn [[path bytes kind ts]]
+                 {:path path :bytes (long bytes) :kind kind :ts (str ts)}))
+          vec))))
 
 (defn pull-repo-file
   "Pull basic repo file fields by eid."

@@ -530,6 +530,17 @@
                     :msg msg
                     :evidence seed})))
 
+(defn- repo-manifest-evidence
+  "Always-available high-level repo context so general questions work."
+  []
+  (let [cfg (config/load-config)
+        limit (long (or (:slap-repo-manifest-limit cfg) 50))
+        rows (db/repo-manifest limit)]
+    (if (seq rows)
+      [{:evidence/type :datalevin/repo-manifest
+        :purpose "Repo file manifest (indexed repo-only)."
+        :rows rows}]
+      [])))
 
 (defn run-slap!
   "Run SLAP loop for a discord message map.
@@ -544,7 +555,8 @@
          question (str (or (:content msg) ""))
          seed (vec (concat (preseed-evidence msg question)
                            (related-extract-evidence msg question)
-                           (repo-preseed-evidence question)))
+                           (repo-preseed-evidence question)
+                           (repo-manifest-evidence)))
          write-ctx {:guild-id (:guild-id msg)
                     :channel-id (:channel-id msg)
                     :message-id (:id msg)
