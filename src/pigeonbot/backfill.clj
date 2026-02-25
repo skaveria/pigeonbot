@@ -17,7 +17,9 @@
 (defn- decode [s]
   (json/decode s true))
 
-(defn- sleep-ms [ms]
+(defn- sleep!
+  "Sleep for ms (long)."
+  [ms]
   (Thread/sleep (long ms)))
 
 (defn- http-get-json
@@ -36,7 +38,7 @@
               retry (or (:retry_after m) 1.0)
               ms (long (+ (* 1000.0 (double retry)) 250))]
           (if (< attempt 10)
-            (do (sleep-ms ms) (recur (inc attempt)))
+            (do (sleep! ms) (recur (inc attempt)))
             (throw (ex-info "Discord rate limit retry exceeded"
                             {:url url :status status :body body}))))
 
@@ -64,12 +66,12 @@
   "Backfill ALL messages for a single channel into Datalevin.
 
   Options:
-    :sleep-ms (default 350)
+    :delay-ms (default 350)
     :max-pages (default nil)
 
   Returns {:channel-id .. :pages .. :messages ..}"
-  [guild-id channel-id & {:keys [sleep-ms max-pages channel-type]
-                          :or {sleep-ms 350}}]
+  [guild-id channel-id & {:keys [delay-ms max-pages channel-type]
+                          :or {delay-ms 350}}]
   (db/ensure-conn!)
   (loop [before nil
          pages 0
@@ -91,7 +93,7 @@
                              :guild-id (str guild-id))
                  channel-type (assoc :channel-type (long channel-type)))))
 
-            (sleep-ms sleep-ms)
+            (sleep! delay-ms)
 
             (let [last-id (some-> (last msgs) :id str)]
               (recur last-id (inc pages) (+ total (count msgs))))))))))
@@ -103,8 +105,8 @@
 
 (defn backfill-guild!
   "Backfill ALL messages for ALL textish channels in a guild."
-  [guild-id & {:keys [sleep-ms]
-               :or {sleep-ms 350}}]
+  [guild-id & {:keys [delay-ms]
+               :or {delay-ms 350}}]
   (let [chs (->> (fetch-guild-channels (str guild-id))
                  (filter guild-textish-channel?)
                  (sort-by :id))
@@ -117,7 +119,7 @@
               ctype (:type ch)]
           (println "Backfilling channel" cid nm)
           (let [res (backfill-channel! (str guild-id) cid
-                                       :sleep-ms sleep-ms
+                                       :delay-ms delay-ms
                                        :channel-type ctype)]
             (update acc :channels conj res))))
       {:guild-id (str guild-id)
