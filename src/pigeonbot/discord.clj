@@ -41,7 +41,7 @@
     :message-create
     (do
       (ctx/record-message! event-data)
-
+      (pigeonbot.db/upsert-message! event-data)
       ;; command routing
       (commands/handle-message event-data)
 
