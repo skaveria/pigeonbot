@@ -164,7 +164,58 @@
      (->> hits
           (filter (fn [[_ a _]] (= a :repo/text)))
           vec))))
+(defn repo-all
+  "Return vector of repo file maps {:repo/path :repo/text :repo/sha :repo/kind :repo/bytes}."
+  []
+  (let [dbv (db)]
+    (->> (d/q '[:find ?e
+                :where
+                [?e :repo/path]]
+              dbv)
+         (map first)
+         (map (fn [eid] (pull-repo-file dbv eid)))
+         (remove nil?)
+         vec)))
 
+(defn repo-search
+  "Repo-only search by scanning repo texts (no Datalevin fulltext needed).
+
+  Returns vector of:
+    {:path \"src/...\" :sha \"...\" :kind :clj :snippet \"...\" :score N}
+
+  Options:
+  - :limit (default 6)
+  - :snippet-chars (default 900)"
+  ([query] (repo-search query {}))
+  ([query {:keys [limit snippet-chars]
+           :or {limit 6 snippet-chars 900}}]
+   (let [q (-> (or query "") str str/trim)]
+     (if (str/blank? q)
+       []
+       (let [needle (str/lower-case q)
+             files (repo-all)
+             scored (->> files
+                         (map (fn [{:repo/keys [path sha kind text bytes] :as m}]
+                                (let [hay (str/lower-case (or text ""))
+                                      idx (.indexOf ^String hay ^String needle)]
+                                  (when (>= idx 0)
+                                    (let [score 1
+                                          ;; pull a centered-ish snippet
+                                          start (max 0 (- idx (quot snippet-chars 4)))
+                                          end   (min (count hay) (+ start snippet-chars))
+                                          snippet (subs (or text "") start (min (count (or text "")) end))]
+                                      {:path path
+                                       :sha sha
+                                       :kind kind
+                                       :bytes bytes
+                                       :snippet snippet
+                                       :score score})))))
+                         (remove nil?)
+                         vec)]
+         (->> scored
+              (sort-by (fn [m] [(- (:score m)) (:path m)]))
+              (take limit)
+              vec))))))
 
 (defn pull-repo-file
   "Pull basic repo file fields by eid."
