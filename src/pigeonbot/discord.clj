@@ -9,6 +9,7 @@
             [pigeonbot.config :as config]
             [pigeonbot.context :as ctx]
             [pigeonbot.custom-commands :as custom]
+            [pigeonbot.db :as db]
             [pigeonbot.discljord-patch :as djpatch]
             [pigeonbot.message-reacts :as reacts]
             [pigeonbot.vision-registry :as vision-reg]
@@ -40,15 +41,22 @@
 
     :message-create
     (do
+      ;; 1) record rolling in-memory context
       (ctx/record-message! event-data)
-      (pigeonbot.db/upsert-message! event-data)
-      ;; command routing
+
+      ;; 2) persist to Datalevin (never let failures break bot)
+      (try
+        (db/upsert-message! event-data)
+        (catch Throwable t
+          (println "db/upsert-message! error:" (.getMessage t))))
+
+      ;; 3) command routing
       (commands/handle-message event-data)
 
-      ;; passive reacts
+      ;; 4) passive reacts
       (reacts/maybe-react! event-data)
 
-      ;; vision rules (image -> labels -> actions)
+      ;; 5) vision rules
       (vision-reacts/maybe-react-vision! event-data))
 
     :message-reaction-add
@@ -60,18 +68,17 @@
     nil))
 
 (defn- supported-intents-set []
-  ;; In discljord 1.3.1 this is a collection (not a map), so treat it as a set.
   (set c/gateway-intents))
 
 (defn- desired-intents
   "Choose gateway intents.
 
-  Default is minimal & known-good: #{:guilds :guild-messages}
+  Default: minimal and stable: [:guilds :guild-messages]
 
-  You can override via config.edn:
-    :discord-intents [:guilds :guild-messages :guild-message-reactions]
+  Override via config.edn:
+    :discord-intents [:guilds :guild-messages :guild-message-reactions :message-content]
 
-  We automatically drop any intent keywords not supported by this discljord build."
+  Any unsupported intents are dropped with a warning."
   []
   (let [cfg (config/load-config)
         requested (or (:discord-intents cfg)
@@ -92,6 +99,9 @@
 (defn start-bot
   "Connect to Discord and start the event pump (blocking)."
   []
+  ;; Ensure DB is open early so we fail fast if path is wrong.
+  (db/ensure-conn!)
+
   (channels/load-channels!)
   (custom/load!)
   (reacts/load!)
