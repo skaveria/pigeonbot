@@ -275,6 +275,10 @@
 ;; Related extracts by tag overlap (Mode A, same channel) -- FIXED QUERY
 ;; -----------------------------------------------------------------------------
 
+;; -----------------------------------------------------------------------------
+;; Related extracts by tag overlap (Mode A, same channel) -- uses :extract/tag
+;; -----------------------------------------------------------------------------
+
 (def ^:private stopwords
   #{"the" "a" "an" "and" "or" "to" "of" "in" "on" "for" "with" "is" "it" "that"
     "this" "be" "are" "was" "were" "as" "at" "by" "from" "but" "so" "if" "you"
@@ -282,7 +286,7 @@
     "saying" "said" "talking" "discuss" "discussion" "summarize" "quick" "test"})
 
 (defn- candidate-tags-from-question
-  "Deterministic tags from question to match against :extract/tags."
+  "Deterministic tags from question to match against :extract/tag."
   [s]
   (let [s (-> (or s "") str/lower-case)
         modelish (re-seq #"\b[a-z]{1,4}\d{1,4}[a-z]?\b" s)
@@ -297,8 +301,8 @@
     tags))
 
 (defn- related-extract-evidence
-  "Pull recent extracts in this channel with tag overlap derived from question.
-  FIX: Use a join on :extract/tags with :in [$ ?cid [?tag ...]]."
+  "Pull recent extracts in this channel that overlap tags derived from the question.
+  IMPORTANT: This uses :extract/tag (singular) as cardinality-many."
   [msg question]
   (let [cfg (config/load-config)
         cid (some-> (:channel-id msg) str)
@@ -307,7 +311,8 @@
     (if (or (not (seq cid)) (empty? tags))
       []
       (let [dbv (db/db)
-            ;; rows: [eid ts txt kind conf matched-tag]
+            ;; Join directly on the candidate tags:
+            ;; rows = [eid ts txt kind conf matched-tag]
             rows (dlv/q '[:find ?eid ?ts ?txt ?kind ?conf ?tag
                           :in $ ?cid [?tag ...]
                           :where
@@ -316,7 +321,7 @@
                           [?eid :extract/text ?txt]
                           [?eid :extract/kind ?kind]
                           [?eid :extract/confidence ?conf]
-                          [?eid :extract/tags ?tag]]
+                          [?eid :extract/tag ?tag]]
                         dbv cid tags)
             grouped (->> rows
                          (group-by first)
@@ -333,6 +338,7 @@
                                    :extract/confidence conf
                                    :extract/matched-tags matched
                                    :extract/overlap (count matched)})))
+                         ;; rank: overlap desc, then ts desc
                          (sort-by (fn [m] [(- (:extract/overlap m)) (:extract/ts m)]))
                          (take limit)
                          vec)]
@@ -342,6 +348,7 @@
             :tags tags
             :rows grouped}]
           [])))))
+
 
 ;; -----------------------------------------------------------------------------
 ;; Packet builder (Mode A temporal + persona)
