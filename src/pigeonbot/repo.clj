@@ -14,7 +14,7 @@
 
 (def ^:private exclude-path-substrings
   ["/.git/" "/target/" "/node_modules/" "/data/" "/.cpcache/" "/.shadow-cljs/"
-   "/.idea/" "/.vscode/" "/.DS_Store"])
+   "/.idea/" "/.vscode/"])
 
 (def ^:private exclude-filenames
   #{"config.edn" ".env" ".env.local" ".envrc" ".nrepl-port"})
@@ -26,7 +26,6 @@
 
 (defn- repo-root []
   ;; Repo-only: assume current working dir is repo root when you run this.
-  ;; If you want a fixed path later, set it in config and read it here.
   (.getCanonicalFile (io/file ".")))
 
 (defn- relpath [^java.io.File root ^java.io.File f]
@@ -34,14 +33,25 @@
         fp (.toPath f)]
     (str (.toString (.relativize rp fp)))))
 
-(defn- included-file? [^java.io.File root ^java.io.File f]
-  (let [p (str "/" (relpath root f))
+(defn- file-ext
+  "Return lowercase extension including dot (e.g. \".clj\"), or nil."
+  [^java.io.File f]
+  (let [name (.getName f)
+        i (.lastIndexOf ^String name ".")]
+    (when (and (>= i 0) (< i (dec (.length ^String name))))
+      (-> (subs name i) str/lower-case))))
+
+(defn- included-file?
+  "Decide whether a file should be indexed (repo-only)."
+  [^java.io.File root ^java.io.File f]
+  (let [rp (str "/" (relpath root f))
         name (.getName f)
-        ext (some-> name (re-find #"\.[^\.]+$") str/lower-case)]
+        ext (file-ext f)]
     (and (.isFile f)
+         (some? ext)
          (contains? include-exts ext)
          (not (contains? exclude-filenames name))
-         (not (some #(str/includes? p %) exclude-path-substrings)))))
+         (not (some #(str/includes? rp %) exclude-path-substrings)))))
 
 (defn- looks-binary?
   "Heuristic: treat NUL byte as binary."
@@ -67,7 +77,10 @@
 
 (defn index-repo!
   "Index repo files into Datalevin under :repo/*.
-  Repo-only by design: reads only from current repo directory.
+
+  Repo-only by design:
+  - reads only from current repo directory
+  - excludes config.edn and common junk dirs
 
   Returns summary:
     {:root \"...\"
@@ -99,12 +112,13 @@
 
            :else
            (let [sha (sha1-hex text)
+                 kind (keyword (subs (or (file-ext f) ".txt") 1))
                  wrote? (db/upsert-repo-file!
                          {:repo/path rp
                           :repo/text text
                           :repo/sha sha
                           :repo/bytes (long (or bytes (count text)))
-                          :repo/kind (keyword (subs (or (re-find #"\.[^\.]+$" (.getName f)) ".txt") 1))})]
+                          :repo/kind kind})]
              (if wrote?
                (swap! indexed inc)
                (swap! skipped inc))
