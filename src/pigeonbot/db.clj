@@ -151,13 +151,20 @@
                dbv (str path))))
 
 (defn repo-fulltext
-  "Full-text search over :repo/text only. Returns datoms [e a v]."
-  ([query] (repo-fulltext query {:attrs [:repo/text]}))
+  "Full-text search over :repo/text only.
+
+  Datalevin fulltext can return hits across all fulltext attrs, so we filter
+  the returned datoms to :repo/text here."
+  ([query] (repo-fulltext query {}))
   ([query opts]
-   (d/q '[:find ?e ?a ?v
-          :in $ ?q ?opts
-          :where [(fulltext $ ?q ?opts) [[?e ?a ?v]]]]
-        (db) query opts)))
+   (let [hits (d/q '[:find ?e ?a ?v
+                     :in $ ?q ?opts
+                     :where [(fulltext $ ?q ?opts) [[?e ?a ?v]]]]
+                   (db) query opts)]
+     (->> hits
+          (filter (fn [[_ a _]] (= a :repo/text)))
+          vec))))
+
 
 (defn pull-repo-file
   "Pull basic repo file fields by eid."
