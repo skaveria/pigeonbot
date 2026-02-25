@@ -178,44 +178,58 @@
          vec)))
 
 (defn repo-search
-  "Repo-only search by scanning repo texts (no Datalevin fulltext needed).
+  "Repo-only search by scanning repo texts with token scoring (no Datalevin fulltext needed).
 
   Returns vector of:
-    {:path \"src/...\" :sha \"...\" :kind :clj :snippet \"...\" :score N}
+    {:path \"src/...\" :sha \"...\" :kind :clj :bytes N :snippet \"...\" :score K :matched [..]}
 
   Options:
   - :limit (default 6)
-  - :snippet-chars (default 900)"
+  - :snippet-chars (default 900)
+  - :min-score (default 1)"
   ([query] (repo-search query {}))
-  ([query {:keys [limit snippet-chars]
-           :or {limit 6 snippet-chars 900}}]
+  ([query {:keys [limit snippet-chars min-score]
+           :or {limit 6 snippet-chars 900 min-score 1}}]
    (let [q (-> (or query "") str str/trim)]
      (if (str/blank? q)
        []
-       (let [needle (str/lower-case q)
-             files (repo-all)
-             scored (->> files
-                         (map (fn [{:repo/keys [path sha kind text bytes] :as m}]
-                                (let [hay (str/lower-case (or text ""))
-                                      idx (.indexOf ^String hay ^String needle)]
-                                  (when (>= idx 0)
-                                    (let [score 1
-                                          ;; pull a centered-ish snippet
-                                          start (max 0 (- idx (quot snippet-chars 4)))
-                                          end   (min (count hay) (+ start snippet-chars))
-                                          snippet (subs (or text "") start (min (count (or text "")) end))]
-                                      {:path path
-                                       :sha sha
-                                       :kind kind
-                                       :bytes bytes
-                                       :snippet snippet
-                                       :score score})))))
-                         (remove nil?)
-                         vec)]
-         (->> scored
-              (sort-by (fn [m] [(- (:score m)) (:path m)]))
+       (let [;; tokenize: keep words and symbol-ish tokens, split on punctuation/space
+             tokens (->> (re-seq #"[a-z0-9\-_]{2,}" (str/lower-case q))
+                         (map #(str/replace % #"^_+|_+$" ""))
+                         (remove str/blank?)
+                         distinct
+                         vec)
+             files (repo-all)]
+         (->> files
+              (map (fn [{:repo/keys [path sha kind text bytes]}]
+                     (let [hay (str/lower-case (or text ""))
+                           ;; find which tokens occur in this file
+                           matched (->> tokens
+                                        (filter #(not= -1 (.indexOf ^String hay ^String %)))
+                                        vec)
+                           score (count matched)]
+                       (when (>= score (long min-score))
+                         ;; pick a snippet around the first matched token occurrence
+                         (let [tok (first matched)
+                               idx (.indexOf ^String hay ^String tok)
+                               start (max 0 (- idx (quot snippet-chars 4)))
+                               end   (min (count (or text "")) (+ start snippet-chars))
+                               snippet (subs (or text "") start end)]
+                           {:path path
+                            :sha sha
+                            :kind kind
+                            :bytes bytes
+                            :snippet snippet
+                            :score score
+                            :matched matched})))))
+              (remove nil?)
+              ;; rank: score desc, then smaller file first, then path
+              (sort-by (fn [m] [(- (:score m))
+                                (long (or (:bytes m) Long/MAX_VALUE))
+                                (:path m)]))
               (take limit)
               vec))))))
+
 
 (defn pull-repo-file
   "Pull basic repo file fields by eid."
