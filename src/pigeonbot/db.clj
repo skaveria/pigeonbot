@@ -157,31 +157,6 @@
   (ffirst (d/q '[:find ?sha :in $ ?p :where [?e :repo/path ?p] [?e :repo/sha ?sha]]
                dbv (str path))))
 
-(defn upsert-repo-file!
-  "Upsert a repo file entity by :repo/path.
-  Returns true if inserted/updated, false if unchanged (sha match)."
-  [{:keys [repo/path repo/text repo/sha repo/bytes repo/kind]
-    :as m}]
-  (let [conn (ensure-conn!)
-        dbv (d/db conn)
-        path (some-> repo/path str)
-        text (some-> repo/text str)
-        sha  (some-> repo/sha str)]
-    (when (and (seq path) (seq text) (seq sha))
-      (let [old (repo-sha-by-path dbv path)]
-        (if (= old sha)
-          false
-          (let [eid (or (repo-eid-by-path dbv path) (d/tempid :db.part/user))
-                ent (drop-nils
-                     {:db/id      eid
-                      :repo/path  path
-                      :repo/sha   sha
-                      :repo/ts    (now-date)
-                      :repo/bytes (long (or repo/bytes (count text)))
-                      :repo/kind  (or repo/kind :txt)
-                      :repo/text  text})]
-            (d/transact! conn [ent])
-            true))))))
 
 (defn repo-fulltext
   "Full-text search over :repo/text. Returns datoms [e a v]."
@@ -203,6 +178,31 @@
 ;; -----------------------------------------------------------------------------
 ;; SPINE writes
 ;; -----------------------------------------------------------------------------
+(defn upsert-repo-file!
+  "Upsert a repo file entity by :repo/path.
+  Returns true if inserted/updated, false if unchanged (sha match)."
+  [{:keys [repo/path repo/text repo/sha repo/bytes repo/kind] :as m}]
+  ;; NOTE: do NOT use :keys [repo/path ...] (invalid). Use keyword lookups instead.
+  (let [conn (ensure-conn!)
+        dbv  (d/db conn)
+        path (some-> (:repo/path m) str)
+        text (some-> (:repo/text m) str)
+        sha  (some-> (:repo/sha m) str)]
+    (when (and (seq path) (seq text) (seq sha))
+      (let [old (repo-sha-by-path dbv path)]
+        (if (= old sha)
+          false
+          (let [eid (or (repo-eid-by-path dbv path) (d/tempid :db.part/user))
+                ent (drop-nils
+                     {:db/id      eid
+                      :repo/path  path
+                      :repo/sha   sha
+                      :repo/ts    (now-date)
+                      :repo/bytes (long (or (:repo/bytes m) (count text)))
+                      :repo/kind  (or (:repo/kind m) :txt)
+                      :repo/text  text})]
+            (d/transact! conn [ent])
+            true))))))
 
 (defn message->tx [{:keys [id timestamp guild-id channel-id channel-type content] :as msg}]
   (let [{:keys [author-name author-id bot?]} (normalize-author msg)
