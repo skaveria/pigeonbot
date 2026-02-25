@@ -1,6 +1,7 @@
 (ns pigeonbot.db
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
+            [pigeonbot.repo :as repo]
             [datalevin.core :as d]))
 
 (def ^:private db-path "./data/pigeonbot-db")
