@@ -151,3 +151,4 @@
   (stop-bot!)
   (Thread/sleep 500)
   (start-bot!))
+;mip
