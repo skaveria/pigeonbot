@@ -81,3 +81,4 @@
 
     (println "[pigeonbot.service] Ready.")
     (.await (CountDownLatch. 1))))
+;pre-pest-mode
