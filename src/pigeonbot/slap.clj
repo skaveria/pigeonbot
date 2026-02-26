@@ -19,7 +19,12 @@
      :model    (or (:openai-model m) "gpt-4.1-mini")
      :timeout  (long (or (:brain-timeout-ms m) 60000))
      :temperature (:openai-temperature m)
-     :max-output-tokens (:openai-max-output-tokens m)}))
+     ;; Make answers longer by default if config doesn't set this.
+     ;; (Your system prompt already asks for 6–10 sentences, but if max_output_tokens is low
+     ;; the model physically can't comply.)
+     :max-output-tokens (if (integer? (:openai-max-output-tokens m))
+                          (:openai-max-output-tokens m)
+                          650)}))
 
 (defn- endpoint [base path]
   (str (str/replace (or base "") #"/+$" "") path))
@@ -134,8 +139,12 @@
    ""
    "Evidence priority rules (IMPORTANT):"
    "- Treat :temporal/recent/context as LOW-PRIORITY vibes only."
+   "- Treat :temporal/recent/datalevin (recent messages) as LOW-PRIORITY unless directly relevant."
    "- Prioritize :knowledge/evidence blocks over temporal context."
-   "- Use temporal context only if it directly matches the question."
+   ""
+   "Database / schema awareness:"
+   "- You will receive :knowledge/:capabilities describing what the local DB can retrieve."
+   "- Use that to craft better query-back requests and avoid guessing what exists."
    ""
    "Evidence usage:"
    "- You will be given :knowledge {:evidence [...]}, containing chat messages, extract summaries, topic padding, and repo snippets."
@@ -146,13 +155,19 @@
    "- Each query-back item should look like:"
    "{:query/id \"q1\" :tool :datalevin/fts :query {:fts \"...\"} :expected {:limit 10} :purpose \"...\" :priority 1}"
    ""
+   "Query-back strategy (IMPORTANT):"
+   "- If you are not confident, you SHOULD query-back rather than guessing."
+   "- Prefer queries with concrete tokens: model numbers, part names, usernames, quoted phrases."
+   "- Start broad (3–6 tokens), then narrow using a quoted phrase from the best evidence."
+   "- Avoid repeating the same query; make each query add new information."
+   "- Keep query count small (1–3 per turn)."
+   ""
    "Persona:"
    "- You will be given :identity/bot persona details and a PERSONA section. Follow that voice."
    ""
    "Answer length:"
    "- Default to a MEDIUM answer: ~6–10 sentences."
    "- If the user explicitly asks for brief, then be brief."
-   "- If the question is simple, 3–6 sentences is fine."
    "- Avoid filler; make each sentence carry weight."
    ""
    "Never include secrets."])
@@ -221,18 +236,14 @@
   Also produces 'trigger-guard' compound when both words appear."
   [s]
   (let [s (-> (or s "") str/lower-case)
-
         modelish-a (re-seq #"\b[a-z]{1,6}\d{1,6}[a-z]?\b" s)
         modelish-b (re-seq #"\b\d{1,6}[a-z]{1,6}\b" s)
-
         words (->> (re-seq #"[a-z]{3,}" s)
                    (remove stopwords))
-
         has-trigger (boolean (re-find #"\btrigger\b" s))
         has-guard   (boolean (re-find #"\bguard\b" s))
         compounds   (cond-> []
                       (and has-trigger has-guard) (conj "trigger-guard"))
-
         tags (->> (concat modelish-a modelish-b compounds words)
                   (map #(str/replace % #"[^a-z0-9\-]+" "")) ;; drop punctuation like 7.62
                   (remove str/blank?)
@@ -354,7 +365,6 @@
                     [?eid :extract/tag ?tag]
                     [?eid :extract/channel-id ?cid]]
                   dbv gid tags)
-
             grouped
             (->> rows
                  (group-by first)
@@ -376,7 +386,6 @@
                            :extract/confidence conf
                            :extract/matched-tags matched
                            :extract/overlap (count matched)})))
-                 ;; rank: overlap desc; if tie, keep stable order by ts string
                  (sort-by (fn [m] [(- (:extract/overlap m)) (:extract/ts m)]))
                  (take limit)
                  vec)]
@@ -394,10 +403,7 @@
     :topic/guild-id
     :topic/message-id
     :topic/topic (cardinality-many)
-  and message spine.
-
-  Config:
-    :slap-topic-related-limit (default 20)"
+  and message spine."
   [msg question]
   (let [cfg (config/load-config)
         gid (some-> (:guild-id msg) str)
@@ -445,12 +451,7 @@
           [])))))
 
 (defn- repo-preseed-evidence
-  "Repo-only code memory: search indexed repo files and include snippets.
-  Uses db/repo-search (scan-based token scoring).
-
-  Config:
-    :slap-repo-preseed-limit (default 6)
-    :slap-repo-snippet-chars (default 900)"
+  "Repo-only code memory: search indexed repo files and include snippets."
   [question]
   (let [cfg (config/load-config)
         limit (long (or (:slap-repo-preseed-limit cfg) 6))
@@ -466,6 +467,32 @@
             :rows rows}]
           [])))))
 
+(defn- vocab-padding-evidence
+  "Optional vocabulary padding: show the model which tags/topics actually exist.
+
+  This helps the model craft better :datalevin/fts queries and not invent tokens.
+
+  Config keys (optional):
+    :slap-vocab-enabled? (default true)
+    :slap-vocab-limit (default 25)"
+  [msg question]
+  (let [cfg (config/load-config)
+        enabled? (not= false (:slap-vocab-enabled? cfg))
+        limit (long (or (:slap-vocab-limit cfg) 25))
+        gid (some-> (:guild-id msg) str)
+        tags (candidate-tags-from-question question)]
+    (if (or (not enabled?) (not (seq gid)) (empty? tags))
+      []
+      (let [top-extract-tags (db/top-extract-tags gid {:limit limit})
+            top-topic-tags   (db/top-topic-tags gid {:limit limit})]
+        (if (or (seq top-extract-tags) (seq top-topic-tags))
+          [{:evidence/type :datalevin/vocab
+            :purpose "Vocabulary hints: common tags/topics in this guild (for better query-back terms)."
+            :guild/id gid
+            :top/extract-tags top-extract-tags
+            :top/topic-tags top-topic-tags}]
+          [])))))
+
 ;; -----------------------------------------------------------------------------
 ;; Packet builder
 ;; -----------------------------------------------------------------------------
@@ -477,7 +504,9 @@
         author-name (or (:global_name author)
                         (:username author)
                         (get-in author [:user :username])
-                        "unknown")]
+                        "unknown")
+        capabilities (db/slap-capabilities {:guild-id (some-> guild-id str)
+                                           :channel-id (some-> channel-id str)})]
     {:slap/version "0.1"
      :packet/id packet-id
      :conversation/id (or conversation-id packet-id)
@@ -496,11 +525,12 @@
                                    :content (str (or content ""))}]
                 :recent/context (trimmed-recent-context msg)
                 :recent/datalevin (recent-messages-from-db msg)}
-     :knowledge {:evidence (vec evidence)}
+     :knowledge {:capabilities capabilities
+                 :evidence (vec evidence)}
      :task {:goal "Answer the user's message using available evidence. If insufficient, request query-back."}}))
 
 ;; -----------------------------------------------------------------------------
-;; Query-back tool: :datalevin/fts (guild-first)
+;; Query-back tool: :datalevin/fts
 ;; -----------------------------------------------------------------------------
 
 (defn- fts-evidence
@@ -543,6 +573,41 @@
             [])))
        vec))
 
+(defn- auto-query-back
+  "If the model says :sufficient? false but provides no query-back,
+  generate a small, schema-aware default query-back.
+
+  Goal: nudge recursion rather than letting it stall."
+  [question]
+  (let [q (-> (or question "") str str/trim)
+        tags (candidate-tags-from-question q)
+        tag-q (when (seq tags)
+                (->> tags (take 6) (str/join " ")))
+        ;; second query: try a tighter phrase from the question
+        words (->> (re-seq #"[A-Za-z0-9][A-Za-z0-9\-\_]{2,}" q)
+                   (map str/lower-case)
+                   (remove stopwords)
+                   (take 8)
+                   vec)
+        phrase-q (when (seq words)
+                   (str "\"" (str/join " " (take 5 words)) "\""))]
+    (->> [(when (seq tag-q)
+            {:query/id "auto1"
+             :tool :datalevin/fts
+             :query {:fts tag-q}
+             :expected {:limit 12}
+             :purpose "Auto recursion: search for concrete tokens/models from the question."
+             :priority 1})
+          (when (seq phrase-q)
+            {:query/id "auto2"
+             :tool :datalevin/fts
+             :query {:fts phrase-q}
+             :expected {:limit 10}
+             :purpose "Auto recursion: try a tighter quoted phrase to pull exact prior context."
+             :priority 2})]
+         (remove nil?)
+         vec)))
+
 ;; -----------------------------------------------------------------------------
 ;; Extract normalization + writeback
 ;; -----------------------------------------------------------------------------
@@ -583,10 +648,12 @@
   (let [packet-id (new-id)
         conversation-id (new-id)
         question (str (or (:content msg) ""))
-        ;; Evidence order matters: distilled/tag padding before raw recency hits.
+
+        ;; Evidence order matters: structured/distilled before raw fts hits.
         seed (vec (concat
                    (related-extract-evidence msg question)
                    (topic-related-message-evidence msg question)
+                   (vocab-padding-evidence msg question)
                    (repo-preseed-evidence question)
                    (preseed-evidence msg question)))]
     (build-request {:packet-id packet-id
@@ -606,11 +673,14 @@
          packet-id (new-id)
          conversation-id (new-id)
          question (str (or (:content msg) ""))
+
          seed (vec (concat
                     (related-extract-evidence msg question)
                     (topic-related-message-evidence msg question)
+                    (vocab-padding-evidence msg question)
                     (repo-preseed-evidence question)
                     (preseed-evidence msg question)))
+
          write-ctx {:guild-id (:guild-id msg)
                     :channel-id (:channel-id msg)
                     :message-id (:id msg)
@@ -626,9 +696,20 @@
                                  :evidence evidence})
              raw (openai-edn! (persona-instructions) (pr-str req))
              resp0 (-> raw safe-edn-read (validate-response! packet-id))
-             qb (vec (or (:query-back resp0) []))
+
              ex (normalize-extracts (:extract resp0))
-             resp (assoc resp0 :query-back qb :extract ex)
+
+             ;; Always normalize query-back to a vector
+             qb0 (vec (or (:query-back resp0) []))
+
+             ;; If insufficient and no query-back, auto-generate a minimal one
+             qb (if (and (not (true? (:sufficient? resp0)))
+                         (empty? qb0)
+                         (< queries-used max-queries))
+                  (auto-query-back question)
+                  qb0)
+
+             resp (assoc resp0 :extract ex :query-back qb)
              sufficient? (true? (:sufficient? resp))]
 
          ;; write extracts every turn (best-effort)
@@ -651,9 +732,10 @@
            {:answer (str (:answer resp)) :resp resp :depth depth}
 
            :else
-           (let [new-evidence (run-query-back msg qb)]
+           (let [new-evidence (run-query-back msg qb)
+                 qb-count (count qb)]
              (if (empty? new-evidence)
                {:answer (str (:answer resp)) :resp resp :depth depth}
                (recur (inc depth)
                       (into (vec evidence) new-evidence)
-                      (+ queries-used (count qb)))))))))))
+                      (+ queries-used qb-count))))))))))

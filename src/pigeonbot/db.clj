@@ -99,8 +99,7 @@
 
 (defonce ^:private conn* (atom nil))
 
-(defn ensure-conn!
-  []
+(defn ensure-conn! []
   (or @conn*
       (let [dir (io/file db-path)]
         (.mkdirs dir)
@@ -138,6 +137,97 @@
 (defn- now-date [] (java.util.Date.))
 
 ;; -----------------------------------------------------------------------------
+;; Capabilities summary for SLAP (schema awareness)
+;; -----------------------------------------------------------------------------
+
+(defn slap-capabilities
+  "Return a small schema/capabilities summary for the SLAP packet.
+
+  Intentionally short and practical: tells the model what exists and what to query.
+  Accepts {:guild-id \"...\" :channel-id \"...\"} for display only."
+  [{:keys [guild-id channel-id]}]
+  {:scope {:guild/id (some-> guild-id str)
+           :channel/id (some-> channel-id str)}
+   :entities
+   [{:entity :message
+     :purpose "Raw Discord messages (spine)."
+     :fulltext [:message/content]
+     :indexed  [:message/guild-id :message/channel-id :message/ts :message/author-name :message/bot?]
+     :notes ["Use :datalevin/fts against message content to pull prior chat context."
+             "Filter to same guild-id by default; channel-id is optional if you want local focus."]}
+    {:entity :extract
+     :purpose "Semantic memory (SLAP writeback)."
+     :fulltext [:extract/text]
+     :indexed  [:extract/guild-id :extract/channel-id :extract/kind :extract/confidence :extract/ts]
+     :tags     {:attr :extract/tag :cardinality :many}
+     :notes ["Tag overlap on :extract/tag is the best fast path for recall."
+             "If tags fail, use :datalevin/fts for phrases that should appear in :extract/text."]}
+    {:entity :topic
+     :purpose "Per-message topic tags (Ollama backfill)."
+     :indexed  [:topic/guild-id :topic/channel-id :topic/message-id]
+     :topics   {:attr :topic/topic :cardinality :many}
+     :notes ["Use topics as padding to find related messages across the guild."]}
+    {:entity :repo
+     :purpose "Indexed repo files (repo-only)."
+     :fulltext [:repo/text]
+     :indexed  [:repo/path :repo/kind :repo/sha]
+     :notes ["Use repo search snippets for codebase questions; keep repo-only facts separate from chat claims."]}]
+   :query-back
+   {:tool :datalevin/fts
+    :shape "{:query/id \"q1\" :tool :datalevin/fts :query {:fts \"...\"} :expected {:limit 10} :purpose \"...\" :priority 1}"
+    :good-queries
+    ["Use concrete tokens (models/parts/usernames) and quoted phrases when possible."
+     "Start broad with 3–6 tokens, then narrow on a specific phrase that appears in evidence."]}})
+
+;; -----------------------------------------------------------------------------
+;; Vocabulary helpers for SLAP (optional)
+;; -----------------------------------------------------------------------------
+
+(defn top-extract-tags
+  "Return a vector of up to :limit common extract tags for a guild.
+  Output: [\"tag\" ...]"
+  ([guild-id] (top-extract-tags guild-id {}))
+  ([guild-id {:keys [limit] :or {limit 25}}]
+   (let [gid (some-> guild-id str)
+         dbv (db)]
+     (if-not (seq gid)
+       []
+       (->> (d/q '[:find ?t (count ?e)
+                  :in $ ?gid
+                  :where
+                  [?e :extract/guild-id ?gid]
+                  [?e :extract/tag ?t]]
+                dbv gid)
+            (sort-by second >)
+            (take (long limit))
+            (map first)
+            (map (fn [t] (-> (str t) str/lower-case str/trim)))
+            (remove str/blank?)
+            vec)))))
+
+(defn top-topic-tags
+  "Return a vector of up to :limit common topic tags for a guild.
+  Output: [\"topic\" ...]"
+  ([guild-id] (top-topic-tags guild-id {}))
+  ([guild-id {:keys [limit] :or {limit 25}}]
+   (let [gid (some-> guild-id str)
+         dbv (db)]
+     (if-not (seq gid)
+       []
+       (->> (d/q '[:find ?t (count ?e)
+                  :in $ ?gid
+                  :where
+                  [?e :topic/guild-id ?gid]
+                  [?e :topic/topic ?t]]
+                dbv gid)
+            (sort-by second >)
+            (take (long limit))
+            (map first)
+            (map (fn [t] (-> (str t) str/lower-case str/trim)))
+            (remove str/blank?)
+            vec)))))
+
+;; -----------------------------------------------------------------------------
 ;; REPO helpers (no dependency on pigeonbot.repo)
 ;; -----------------------------------------------------------------------------
 
@@ -162,36 +252,18 @@
             eid)
     (catch Throwable _ nil)))
 
-(defn repo-fulltext
-  "Full-text search over :repo/text only.
-
-  Datalevin fulltext can return hits across all fulltext attrs, so we filter
-  the returned datoms to :repo/text here."
-  ([query] (repo-fulltext query {}))
-  ([query opts]
-   (let [hits (d/q '[:find ?e ?a ?v
-                     :in $ ?q ?opts
-                     :where [(fulltext $ ?q ?opts) [[?e ?a ?v]]]]
-                   (db) query opts)]
-     (->> hits
-          (filter (fn [[_ a _]] (= a :repo/text)))
-          vec))))
-
 (defn repo-all
   "Return vector of repo file maps {:repo/path :repo/text :repo/sha :repo/kind :repo/bytes}."
   []
   (let [dbv (db)]
-    (->> (d/q '[:find ?e
-                :where
-                [?e :repo/path]]
-              dbv)
+    (->> (d/q '[:find ?e :where [?e :repo/path]] dbv)
          (map first)
          (map (fn [eid] (pull-repo-file dbv eid)))
          (remove nil?)
          vec)))
 
 (defn repo-search
-  "Repo-only search by scanning repo texts with token scoring (no Datalevin fulltext needed).
+  "Repo-only search by scanning repo texts with token scoring.
 
   Returns vector of:
     {:path \"src/...\" :sha \"...\" :kind :clj :bytes N :snippet \"...\" :score K :matched [..]}
@@ -238,24 +310,6 @@
                                 (:path m)]))
               (take limit)
               vec))))))
-
-(defn repo-manifest
-  "Return a lightweight manifest of indexed repo files."
-  ([] (repo-manifest 60))
-  ([limit]
-   (let [dbv (db)]
-     (->> (d/q '[:find ?path ?bytes ?kind ?ts
-                 :where
-                 [?e :repo/path ?path]
-                 [?e :repo/bytes ?bytes]
-                 [?e :repo/kind ?kind]
-                 [?e :repo/ts ?ts]]
-               dbv)
-          (sort-by (fn [[path _ _ _]] path))
-          (take (long limit))
-          (map (fn [[path bytes kind ts]]
-                 {:path path :bytes (long bytes) :kind kind :ts (str ts)}))
-          vec))))
 
 (defn upsert-repo-file!
   "Upsert a repo file entity by :repo/path.
