@@ -99,17 +99,66 @@
 
 (defonce ^:private conn* (atom nil))
 
-(defn ensure-conn! []
+(defn- now-stamp []
+  (.format (java.time.format.DateTimeFormatter/ofPattern "yyyyMMdd-HHmmss")
+           (java.time.LocalDateTime/now)))
+
+(defn- quarantine-db-dir!
+  "Move db-path to a timestamped BAD dir. Best-effort."
+  [db-path]
+  (try
+    (let [src (io/file db-path)
+          parent (.getParentFile src)
+          name (.getName src)
+          dst (io/file parent (str name ".BAD-" (now-stamp)))]
+      (when (.exists src)
+        (.mkdirs parent)
+        (when-not (.renameTo src dst)
+          ;; fallback: if rename fails, try copy+delete would be more code;
+          ;; for now, at least don't crash hard.
+          (println "[pigeonbot.db] WARN: failed to rename DB dir" (.getAbsolutePath src) "->" (.getAbsolutePath dst)))))
+    (catch Throwable t
+      (println "[pigeonbot.db] WARN: quarantine failed:" (.getMessage t))))
+  true)
+
+(defn ensure-conn!
+  "Open Datalevin connection, auto-recovering from common LMDB/fulltext corruption.
+
+  If open fails with a datalevin/terms iterator error, we quarantine the DB dir and
+  recreate a fresh one so the bot can boot."
+  []
   (or @conn*
       (let [dir (io/file db-path)]
         (.mkdirs dir)
-        (reset! conn* (d/create-conn db-path schema)))))
+        (try
+          (reset! conn* (d/create-conn db-path schema))
+          @conn*
+          (catch Throwable t
+            (let [msg (str (.getMessage t))
+                  ed  (try (ex-data t) (catch Throwable _ nil))
+                  ;; This is the signature you pasted:
+                  ;; {:dbi datalevin/terms, :k-range [:all-back], ...}
+                  terms? (or (and (map? ed) (= "datalevin/terms" (str (:dbi ed))))
+                             (and (map? ed) (= :datalevin/terms (:dbi ed)))
+                             (str/includes? msg "datalevin/terms")
+                             (str/includes? msg "Native iterator returns error code"))]
+              (println "[pigeonbot.db] ERROR opening DB:" msg (or ed {}))
+              (when terms?
+                (println "[pigeonbot.db] Detected corrupted fulltext terms index; quarantining DB and recreating.")
+                (reset! conn* nil)
+                (quarantine-db-dir! db-path)
+                (.mkdirs (io/file db-path))
+                (reset! conn* (d/create-conn db-path schema))
+                @conn*)
+              (when-not terms?
+                (throw t))))))))
 
 (defn close! []
   (when-let [c @conn*]
     (try (d/close c) (catch Throwable _))
     (reset! conn* nil))
   true)
+
 
 (defn db []
   (d/db (ensure-conn!)))
