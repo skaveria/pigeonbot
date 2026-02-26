@@ -48,7 +48,7 @@
    :extract/id            {:db/unique :db.unique/identity
                            :db/valueType :db.type/string :db/index true}
 
-   ;; NEW: de-dupe key
+   ;; de-dupe key
    :extract/hash          {:db/unique :db.unique/identity
                            :db/valueType :db.type/string :db/index true}
 
@@ -75,14 +75,15 @@
    :extract/tags          {:db/valueType :db.type/string  :db/index true}
 
    ;; -------------------------
-;; REPO: indexed source files (repo-only)
-;; -------------------------
-:repo/path   {:db/unique :db.unique/identity :db/valueType :db.type/string :db/index true}
-:repo/sha    {:db/valueType :db.type/string :db/index true}
-:repo/ts     {:db/valueType :db.type/instant :db/index true}
-:repo/bytes  {:db/valueType :db.type/long :db/index true}
-:repo/kind   {:db/valueType :db.type/keyword :db/index true}
-:repo/text   {:db/valueType :db.type/string :db/fulltext true}
+   ;; REPO: indexed source files (repo-only)
+   ;; -------------------------
+   :repo/path   {:db/unique :db.unique/identity :db/valueType :db.type/string :db/index true}
+   :repo/sha    {:db/valueType :db.type/string :db/index true}
+   :repo/ts     {:db/valueType :db.type/instant :db/index true}
+   :repo/bytes  {:db/valueType :db.type/long :db/index true}
+   :repo/kind   {:db/valueType :db.type/keyword :db/index true}
+   :repo/text   {:db/valueType :db.type/string :db/fulltext true}
+
    ;; -------------------------
    ;; TOPICS: per-message topic tags (separate from spine)
    ;; -------------------------
@@ -134,8 +135,11 @@
 (defn- drop-nils [m]
   (into {} (remove (comp nil? val)) m))
 
-
 (defn- now-date [] (java.util.Date.))
+
+;; -----------------------------------------------------------------------------
+;; REPO helpers (no dependency on pigeonbot.repo)
+;; -----------------------------------------------------------------------------
 
 (defn- repo-eid-by-path
   "Return eid for a repo file by path, or nil."
@@ -148,6 +152,7 @@
   [dbv path]
   (ffirst (d/q '[:find ?sha :in $ ?p :where [?e :repo/path ?p] [?e :repo/sha ?sha]]
                dbv (str path))))
+
 (defn pull-repo-file
   "Pull basic repo file fields by eid."
   [dbv eid]
@@ -156,7 +161,6 @@
             [:repo/path :repo/sha :repo/ts :repo/bytes :repo/kind :repo/text]
             eid)
     (catch Throwable _ nil)))
-
 
 (defn repo-fulltext
   "Full-text search over :repo/text only.
@@ -172,6 +176,7 @@
      (->> hits
           (filter (fn [[_ a _]] (= a :repo/text)))
           vec))))
+
 (defn repo-all
   "Return vector of repo file maps {:repo/path :repo/text :repo/sha :repo/kind :repo/bytes}."
   []
@@ -201,8 +206,7 @@
    (let [q (-> (or query "") str str/trim)]
      (if (str/blank? q)
        []
-       (let [;; tokenize: keep words and symbol-ish tokens, split on punctuation/space
-             tokens (->> (re-seq #"[a-z0-9\-_]{2,}" (str/lower-case q))
+       (let [tokens (->> (re-seq #"[a-z0-9\-_]{2,}" (str/lower-case q))
                          (map #(str/replace % #"^_+|_+$" ""))
                          (remove str/blank?)
                          distinct
@@ -211,13 +215,11 @@
          (->> files
               (map (fn [{:repo/keys [path sha kind text bytes]}]
                      (let [hay (str/lower-case (or text ""))
-                           ;; find which tokens occur in this file
                            matched (->> tokens
                                         (filter #(not= -1 (.indexOf ^String hay ^String %)))
                                         vec)
                            score (count matched)]
                        (when (>= score (long min-score))
-                         ;; pick a snippet around the first matched token occurrence
                          (let [tok (first matched)
                                idx (.indexOf ^String hay ^String tok)
                                start (max 0 (- idx (quot snippet-chars 4)))
@@ -231,7 +233,6 @@
                             :score score
                             :matched matched})))))
               (remove nil?)
-              ;; rank: score desc, then smaller file first, then path
               (sort-by (fn [m] [(- (:score m))
                                 (long (or (:bytes m) Long/MAX_VALUE))
                                 (:path m)]))
@@ -256,14 +257,10 @@
                  {:path path :bytes (long bytes) :kind kind :ts (str ts)}))
           vec))))
 
-;; -----------------------------------------------------------------------------
-;; SPINE writes
-;; -----------------------------------------------------------------------------
 (defn upsert-repo-file!
   "Upsert a repo file entity by :repo/path.
   Returns true if inserted/updated, false if unchanged (sha match)."
   [{:keys [repo/path repo/text repo/sha repo/bytes repo/kind] :as m}]
-  ;; NOTE: do NOT use :keys [repo/path ...] (invalid). Use keyword lookups instead.
   (let [conn (ensure-conn!)
         dbv  (d/db conn)
         path (some-> (:repo/path m) str)
@@ -284,6 +281,10 @@
                       :repo/text  text})]
             (d/transact! conn [ent])
             true))))))
+
+;; -----------------------------------------------------------------------------
+;; SPINE writes
+;; -----------------------------------------------------------------------------
 
 (defn message->tx [{:keys [id timestamp guild-id channel-id channel-type content] :as msg}]
   (let [{:keys [author-name author-id bot?]} (normalize-author msg)
@@ -416,7 +417,7 @@
 (defn extract-item->txdata
   "Return tx-data for one extract:
   - If new: entity map + :extract/tag datoms
-  - If dup: increment :extract/seen-count, update :extract/last-seen, add missing tags"
+  - If dup: bump seen-count + last-seen, add missing tags"
   [ctx item]
   (let [{:keys [guild-id channel-id message-id packet-id model]} ctx
         item-map (cond
@@ -442,11 +443,9 @@
             (if existing
               (let [have (existing-extract-tags dbv existing)
                     missing (remove have tags)
-                    ;; Note: we don't overwrite :extract/text; we just bump seen stats + tags.
                     ops (concat
                          [[:db/add existing :extract/last-seen now]
                           [:db/add existing :extract/seen-count 1]
-                          ;; keep provenance of most recent mention (optional)
                           [:db/add existing :extract/message-id (some-> message-id str)]
                           [:db/add existing :extract/packet-id (some-> packet-id str)]
                           [:db/add existing :extract/model (or model "openai")]]
