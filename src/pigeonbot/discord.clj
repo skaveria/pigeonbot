@@ -15,11 +15,12 @@
             [pigeonbot.vision-registry :as vision-reg]
             [pigeonbot.vision-reacts :as vision-reacts]
             [pigeonbot.reaction-roles :as rr]
-            [pigeonbot.pest :as pest]              ;; NEW
+            ;; If you have pest wired in already, keep it:
+            [pigeonbot.pest :as pest]
             [pigeonbot.state :refer [state]]))
 
 (defonce seen-events* (atom #{}))
-(defonce bot-future (atom nil))
+(defonce bot-future* (atom nil))
 
 (defn handle-event
   [event-type event-data]
@@ -62,7 +63,8 @@
       (vision-reacts/maybe-react-vision! event-data)
 
       ;; pest mode (optional, guarded)
-      (pest/maybe-pest! event-data))
+      (when (resolve 'pigeonbot.pest/maybe-pest!)
+        (pest/maybe-pest! event-data)))
 
     :message-reaction-add
     (rr/handle-reaction-add! event-data)
@@ -96,41 +98,80 @@
 (defn start-bot
   "Connect to Discord and start the event pump (blocking)."
   []
-  ;; ensure DB early
-  (db/ensure-conn!)
+  (try
+    ;; ensure DB early
+    (db/ensure-conn!)
 
-  (channels/load-channels!)
-  (custom/load!)
-  (reacts/load!)
-  (vision-reg/load!)
-  (djpatch/patch-discljord!)
+    (channels/load-channels!)
+    (custom/load!)
+    (reacts/load!)
+    (vision-reg/load!)
+    (djpatch/patch-discljord!)
 
-  (let [cfg (config/load-config)
-        token (or (:token cfg) (config/discord-token))
-        _ (when-not (and token (seq token))
-            (throw (ex-info "Missing Discord token. Set DISCORD_TOKEN in your environment."
-                            {:env ["DISCORD_TOKEN" "PIGEONBOT_TOKEN"]})))
+    (let [cfg (config/load-config)
+          token (or (:token cfg) (config/discord-token))
+          _ (when-not (and token (seq token))
+              (throw (ex-info "Missing Discord token. Set DISCORD_TOKEN in your environment."
+                              {:env ["DISCORD_TOKEN" "PIGEONBOT_TOKEN"]})))
 
-        event-ch (a/chan 100)
-        intents (desired-intents)
+          event-ch (a/chan 100)
+          intents (desired-intents)
 
-        conn   (c/connect-bot! token event-ch :intents intents)
-        msg-ch (m/start-connection! token)]
+          ;; IMPORTANT: if anything below throws, we want to SEE IT in the service logs.
+          conn   (c/connect-bot! token event-ch :intents intents)
+          msg-ch (m/start-connection! token)]
 
-    (println "Gateway intents:" intents)
+      (println "Gateway intents:" intents)
 
-    (reset! state {:connection conn :events event-ch :messaging msg-ch})
-    (println "Connected to Discord (online)")
-    (e/message-pump! event-ch handle-event)))
+      (reset! state {:connection conn :events event-ch :messaging msg-ch})
+      (println "Connected to Discord (online)")
 
-(defn start-bot! []
-  (reset! bot-future (future (start-bot)))
-  (loop [tries 0]
-    (if-let [msg (:messaging @state)]
-      msg
-      (if (< tries 20)
-        (do (Thread/sleep 250) (recur (inc tries)))
-        (do (println "start-bot!: timed out waiting for messaging connection.") nil)))))
+      ;; Blocking pump
+      (e/message-pump! event-ch handle-event))
+    (catch Throwable t
+      (println "[pigeonbot.discord] start-bot crashed:" (.getMessage t) (or (ex-data t) {}))
+      (throw t))))
+
+(defn- report-future-if-failed!
+  "If the bot future is done, force deref so exceptions print and don't silently die."
+  [f]
+  (when (and f (future-done? f))
+    (try
+      ;; deref will rethrow if it failed
+      @f
+      (catch Throwable t
+        (println "[pigeonbot.discord] bot future failed:" (.getMessage t) (or (ex-data t) {}))
+        (throw t)))))
+
+(defn start-bot!
+  "Start bot in a future and wait until :messaging is present in state.
+  Returns messaging channel or nil.
+
+  This prints the underlying exception if the bot future died."
+  []
+  (let [f (future (start-bot))]
+    (reset! bot-future* f)
+    ;; wait up to ~30s (120 * 250ms)
+    (loop [tries 0]
+      (when (< tries 120)
+        ;; if the bot future crashed, surface it immediately
+        (when (future-done? f)
+          (try
+            (report-future-if-failed! f)
+            (catch Throwable _
+              ;; already printed; stop waiting
+              (recur 9999))))
+        (if-let [msg (:messaging @state)]
+          msg
+          (do
+            (Thread/sleep 250)
+            (recur (inc tries))))))
+    (when-not (:messaging @state)
+      (println "start-bot!: timed out waiting for messaging connection.")
+      ;; one last check for failure
+      (when (and f (future-done? f))
+        (try (report-future-if-failed! f) (catch Throwable _)))
+      nil)))
 
 (defn stop-bot! []
   (let [{:keys [events connection messaging]} @state]
@@ -145,8 +186,8 @@
       (try (m/stop-connection! messaging)
            (catch Throwable t (println "stop-bot!: stop-connection! failed:" (.getMessage t))))))
 
-  (when-let [f @bot-future] (future-cancel f))
-  (reset! bot-future nil)
+  (when-let [f @bot-future*] (future-cancel f))
+  (reset! bot-future* nil)
   (reset! state {})
   (println "Bot stopped."))
 
@@ -155,4 +196,3 @@
   (stop-bot!)
   (Thread/sleep 500)
   (start-bot!))
-; back online

@@ -11,7 +11,8 @@
      :nrepl-port (long (or (:nrepl-port m) 7888))
 
      ;; REST poller knobs (optional)
-     :poller-enabled? (not= false (:rest-poller-enabled? m))
+     ;; IMPORTANT: default OFF unless explicitly true.
+     :poller-enabled? (true? (:rest-poller-enabled? m))
      :poller-guild-id (:rest-poller-guild-id m)
      :poller-interval-ms (long (or (:rest-poller-interval-ms m) 2000))
      :poller-refresh-ms  (long (or (:rest-poller-refresh-ms m) 600000))
@@ -62,7 +63,9 @@
     (println "[pigeonbot.service] nREPL started:" (str nrepl-host ":" (:port server)))
 
     (println "[pigeonbot.service] Starting Discord bot…")
-    (discord/start-bot!)
+    (let [msg-ch (discord/start-bot!)]
+      (when-not msg-ch
+        (println "[pigeonbot.service] WARNING: Discord bot did not report a messaging connection (check logs above for crash details).")))
 
     ;; Optional: REST poller
     (try
@@ -81,4 +84,3 @@
 
     (println "[pigeonbot.service] Ready.")
     (.await (CountDownLatch. 1))))
-;pre-pest-mode
