@@ -148,6 +148,15 @@
   [dbv path]
   (ffirst (d/q '[:find ?sha :in $ ?p :where [?e :repo/path ?p] [?e :repo/sha ?sha]]
                dbv (str path))))
+(defn pull-repo-file
+  "Pull basic repo file fields by eid."
+  [dbv eid]
+  (try
+    (d/pull dbv
+            [:repo/path :repo/sha :repo/ts :repo/bytes :repo/kind :repo/text]
+            eid)
+    (catch Throwable _ nil)))
+
 
 (defn repo-fulltext
   "Full-text search over :repo/text only.
@@ -247,14 +256,6 @@
                  {:path path :bytes (long bytes) :kind kind :ts (str ts)}))
           vec))))
 
-(defn pull-repo-file
-  "Pull basic repo file fields by eid."
-  [dbv eid]
-  (try
-    (d/pull dbv
-            [:repo/path :repo/sha :repo/ts :repo/bytes :repo/kind :repo/text]
-            eid)
-    (catch Throwable _ nil)))
 ;; -----------------------------------------------------------------------------
 ;; SPINE writes
 ;; -----------------------------------------------------------------------------
