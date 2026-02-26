@@ -15,7 +15,7 @@
             [pigeonbot.vision-registry :as vision-reg]
             [pigeonbot.vision-reacts :as vision-reacts]
             [pigeonbot.reaction-roles :as rr]
-            ;; If you have pest wired in already, keep it:
+            ;; If pest exists in your tree, keep it:
             [pigeonbot.pest :as pest]
             [pigeonbot.state :refer [state]]))
 
@@ -62,7 +62,7 @@
       ;; vision rules
       (vision-reacts/maybe-react-vision! event-data)
 
-      ;; pest mode (optional, guarded)
+      ;; pest mode (optional)
       (when (resolve 'pigeonbot.pest/maybe-pest!)
         (pest/maybe-pest! event-data)))
 
@@ -117,12 +117,11 @@
           event-ch (a/chan 100)
           intents (desired-intents)
 
-          ;; IMPORTANT: if anything below throws, we want to SEE IT in the service logs.
+          ;; if this throws, we want to SEE IT
           conn   (c/connect-bot! token event-ch :intents intents)
           msg-ch (m/start-connection! token)]
 
       (println "Gateway intents:" intents)
-
       (reset! state {:connection conn :events event-ch :messaging msg-ch})
       (println "Connected to Discord (online)")
 
@@ -132,12 +131,11 @@
       (println "[pigeonbot.discord] start-bot crashed:" (.getMessage t) (or (ex-data t) {}))
       (throw t))))
 
-(defn- report-future-if-failed!
-  "If the bot future is done, force deref so exceptions print and don't silently die."
+(defn- throw-if-future-failed!
+  "If future is done, deref it to surface crashes (rethrows)."
   [f]
   (when (and f (future-done? f))
     (try
-      ;; deref will rethrow if it failed
       @f
       (catch Throwable t
         (println "[pigeonbot.discord] bot future failed:" (.getMessage t) (or (ex-data t) {}))
@@ -147,31 +145,38 @@
   "Start bot in a future and wait until :messaging is present in state.
   Returns messaging channel or nil.
 
-  This prints the underlying exception if the bot future died."
+  If the bot future crashes, we print and rethrow the exception."
   []
   (let [f (future (start-bot))]
     (reset! bot-future* f)
     ;; wait up to ~30s (120 * 250ms)
     (loop [tries 0]
-      (when (< tries 120)
-        ;; if the bot future crashed, surface it immediately
-        (when (future-done? f)
-          (try
-            (report-future-if-failed! f)
-            (catch Throwable _
-              ;; already printed; stop waiting
-              (recur 9999))))
-        (if-let [msg (:messaging @state)]
-          msg
-          (do
-            (Thread/sleep 250)
-            (recur (inc tries))))))
-    (when-not (:messaging @state)
-      (println "start-bot!: timed out waiting for messaging connection.")
-      ;; one last check for failure
-      (when (and f (future-done? f))
-        (try (report-future-if-failed! f) (catch Throwable _)))
-      nil)))
+      (cond
+        ;; success
+        (:messaging @state)
+        (:messaging @state)
+
+        ;; crash: surface real exception
+        (future-done? f)
+        (do
+          (throw-if-future-failed! f)
+          ;; If it somehow completed cleanly but didn't set :messaging:
+          (println "start-bot!: bot future completed but messaging is still nil.")
+          nil)
+
+        ;; timeout
+        (>= tries 120)
+        (do
+          (println "start-bot!: timed out waiting for messaging connection.")
+          ;; if it died right at the end, surface it
+          (when (future-done? f)
+            (throw-if-future-failed! f))
+          nil)
+
+        :else
+        (do
+          (Thread/sleep 250)
+          (recur (inc tries)))))))
 
 (defn stop-bot! []
   (let [{:keys [events connection messaging]} @state]
