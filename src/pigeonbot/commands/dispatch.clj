@@ -5,12 +5,14 @@
             [pigeonbot.commands.registry :as reg]
             [pigeonbot.commands.util :as u]
             [pigeonbot.commands.ask :as ask]
+            [pigeonbot.threads :as threads]
             ;; load modules for side-effect registration via defcmd
             [pigeonbot.commands.builtins]
             [pigeonbot.commands.roles]
             [pigeonbot.commands.custom]
             [pigeonbot.commands.vision]
-            [pigeonbot.commands.reacts]))
+            [pigeonbot.commands.reacts]
+            [pigeonbot.commands.pest]))  ;; NEW
 
 (def command-descriptions reg/command-descriptions)
 
@@ -18,8 +20,9 @@
   "Dispatch order:
   1) built-in commands (!ping, !ask, etc)
   2) custom commands (CDN URL-based)
-  3) ask-like triggers (reply / @mention)"
-  [{:keys [content channel-id] :as msg}]
+  3) thread continuation (Option B): if pigeonbot has spoken in a thread, treat new messages as ask
+  4) ask-like triggers (reply / @mention)"
+  [{:keys [content channel-id id] :as msg}]
   (let [cmd (first (str/split (or content "") #"\s+"))]
     (cond
       ;; 1) built-ins
@@ -31,21 +34,27 @@
       ;; 2) custom commands
       (when-let [r (custom/registered-reply cmd)]
         (case (:type r)
-          :url
-          (do (u/send! channel-id :content (:url r)) true)
+          :url (do (u/send! channel-id :content (:url r)) true)
 
           ;; back-compat if you still have old file-based custom commands
-          :file
-          (let [f (io/file "src/pigeonbot/media" (:file r))]
-            (when (.exists f)
-              (u/send-file! channel-id f))
-            true)
+          :file (let [f (io/file "src/pigeonbot/media" (:file r))]
+                  (when (.exists f)
+                    (u/send-file! channel-id f))
+                  true)
 
           nil))
       nil
 
-      ;; 3) ask-like triggers
+      ;; 3) thread continuation: no @ needed after pigeonbot has spoken once in the thread
+      (threads/should-auto-ask? msg)
+      (do
+        ;; Keep it tidy by replying to the triggering message in-thread.
+        (ask/run-ask! msg (str/trim (or content "")) (str id))
+        true)
+
+      ;; 4) ask-like triggers (reply / @mention)
       (ask/handle-ask-like! msg)
       true
 
-      :else nil)))
+      :else
+      nil)))

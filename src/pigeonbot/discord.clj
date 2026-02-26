@@ -15,6 +15,7 @@
             [pigeonbot.vision-registry :as vision-reg]
             [pigeonbot.vision-reacts :as vision-reacts]
             [pigeonbot.reaction-roles :as rr]
+            [pigeonbot.pest :as pest]              ;; NEW
             [pigeonbot.state :refer [state]]))
 
 (defonce seen-events* (atom #{}))
@@ -58,7 +59,10 @@
       (reacts/maybe-react! event-data)
 
       ;; vision rules
-      (vision-reacts/maybe-react-vision! event-data))
+      (vision-reacts/maybe-react-vision! event-data)
+
+      ;; pest mode (optional, guarded)
+      (pest/maybe-pest! event-data))
 
     :message-reaction-add
     (rr/handle-reaction-add! event-data)
@@ -151,4 +155,3 @@
   (stop-bot!)
   (Thread/sleep 500)
   (start-bot!))
-;mip
