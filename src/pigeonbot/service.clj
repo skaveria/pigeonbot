@@ -1,8 +1,8 @@
 (ns pigeonbot.service
   (:require [nrepl.server :as nrepl]
             [cider.nrepl :refer [cider-nrepl-handler]]
-            [pigeonbot.discord :as discord]
-            [pigeonbot.config :as config])
+            [pigeonbot.config :as config]
+            [pigeonbot.rest-poller :as poller])
   (:import (java.util.concurrent CountDownLatch)))
 
 (defn- cfg []
@@ -21,17 +21,16 @@
                 :handler cider-nrepl-handler)]
     (write-port-file! (:port server))
     (println "[pigeonbot.service] nREPL started:" (str nrepl-host ":" (:port server)))
-    (println "[pigeonbot.service] Starting Discord bot…")
+    (println "[pigeonbot.service] Starting REST poller…")
 
-    ;; Start bot in its own future so the service main thread can block cleanly.
-    (discord/start-bot!)
+    (poller/start!)
 
     (.addShutdownHook
      (Runtime/getRuntime)
      (Thread.
       (fn []
         (println "[pigeonbot.service] Shutting down…")
-        (try (discord/stop-bot!) (catch Throwable _))
+        (try (poller/stop!) (catch Throwable _))
         (try (nrepl/stop-server server) (catch Throwable _)))))
 
     (println "[pigeonbot.service] Ready.")
