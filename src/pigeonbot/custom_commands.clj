@@ -1,6 +1,7 @@
 (ns pigeonbot.custom-commands
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [pigeonbot.config :as config]))
 
 (def ^:private registry-path
@@ -42,6 +43,10 @@ Back-compat: older entries may have {:file \"custom/moo.png\"}."}
   [name]
   (str "!" name))
 
+(defn valid-url?
+  [s]
+  (boolean (re-matches #"https?://\S+" (str/trim (or s "")))))
+
 ;; -----------------------------------------------------------------------------
 ;; Permissions
 ;; -----------------------------------------------------------------------------
@@ -57,10 +62,28 @@ Back-compat: older entries may have {:file \"custom/moo.png\"}."}
         (contains? admins (str uid)))))
 
 ;; -----------------------------------------------------------------------------
-;; Register (CDN URL-based)
+;; Register (URL-based primary, attachment fallback)
 ;; -----------------------------------------------------------------------------
 
 (def ^:private max-bytes (* 8 1024 1024))
+
+(defn register-from-url!
+  "Register a custom command from a direct URL."
+  [cmd url author-id]
+  (let [url (str/trim (str url))]
+    (cond
+      (not (valid-url? url))
+      {:ok? false :reason :bad-url :message "That doesn't look like a valid http(s) URL."}
+
+      :else
+      (do
+        (swap! registry* assoc cmd
+               {:type :url
+                :url url
+                :added-by (str author-id)
+                :added-at (System/currentTimeMillis)})
+        (save!)
+        {:ok? true :cmd cmd :url url}))))
 
 (defn register-from-attachment!
   "Register a custom command from a Discord attachment map.
