@@ -4,30 +4,40 @@
             [pigeonbot.commands.registry :refer [defcmd commands]]
             [pigeonbot.commands.util :as u]))
 
-(defcmd "!registercommand" "Register custom command: !registercommand <name> + attach"
+(defcmd "!registercommand" "Register custom command: !registercommand <name> <url>  (attachment still supported)"
   [{:keys [channel-id content attachments author] :as msg}]
   (cond
     (not (custom/allowed-to-register? msg))
     (u/send! channel-id :content "❌ You’re not allowed to register commands.")
+
     :else
-    (let [[_ name] (str/split (or content "") #"\s+" 3)]
+    (let [[_ name maybe-url] (str/split (or content "") #"\s+" 3)]
       (cond
         (not (custom/valid-name? name))
-        (u/send! channel-id :content "Usage: !registercommand <name>")
-        (empty? attachments)
-        (u/send! channel-id :content "Attach a file to register.")
+        (u/send! channel-id :content "Usage: !registercommand <name> <url>  (or attach a file)")
+
+        (contains? @commands (custom/normalize-command name))
+        (u/send! channel-id :content (str "❌ `" (custom/normalize-command name) "` is built-in; can’t override."))
+
+        (and (seq maybe-url) (custom/valid-url? maybe-url))
+        (let [cmd (custom/normalize-command name)
+              author-id (get-in author [:id])
+              {:keys [ok? message]} (custom/register-from-url! cmd maybe-url author-id)]
+          (if ok?
+            (u/send! channel-id :content (str "✅ Registered `" cmd "` → " maybe-url))
+            (u/send! channel-id :content (str "❌ " message))))
+
+        (seq attachments)
+        (let [cmd (custom/normalize-command name)
+              att (first attachments)
+              author-id (get-in author [:id])
+              {:keys [ok? message]} (custom/register-from-attachment! cmd att author-id)]
+          (if ok?
+            (u/send! channel-id :content (str "✅ Registered `" cmd "` (attachment URL saved)."))
+            (u/send! channel-id :content (str "❌ " message))))
+
         :else
-        (let [cmd (custom/normalize-command name)]
-          (cond
-            (contains? @commands cmd)
-            (u/send! channel-id :content (str "❌ `" cmd "` is built-in; can’t override."))
-            :else
-            (let [att (first attachments)
-                  author-id (get-in author [:id])
-                  {:keys [ok? message]} (custom/register-from-attachment! cmd att author-id)]
-              (if ok?
-                (u/send! channel-id :content (str "✅ Registered `" cmd "` (CDN link saved)."))
-                (u/send! channel-id :content (str "❌ " message))))))))))
+        (u/send! channel-id :content "Usage: !registercommand <name> <url>  (or attach a file)")))))
 
 (defcmd "!delcommand" "Delete custom command: !delcommand <name>"
   [{:keys [channel-id content] :as msg}]
@@ -51,12 +61,13 @@
         (or (not (custom/valid-name? old-name))
             (not (custom/valid-name? new-name)))
         (u/send! channel-id :content "Usage: !renamecommand <old> <new>")
+
         :else
         (let [old-cmd (custom/normalize-command old-name)
               new-cmd (custom/normalize-command new-name)
               {:keys [ok? message]} (custom/rename! old-cmd new-cmd)]
           (u/send! channel-id :content (if ok?
-                                        (str "✅ Renamed `" old-cmd "` → `" new-cmd "`.") 
+                                        (str "✅ Renamed `" old-cmd "` → `" new-cmd "`.")
                                         (str "❌ " message))))))))
 
 (defcmd "!listcommands" "List commands (built-ins + custom)."
