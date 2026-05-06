@@ -192,77 +192,77 @@
     ""
     "No markdown. No prose outside the EDN map."]))
 
-(defn backfill-channel-extracts!
-  "Build missing extract memories for one channel.
 
-  Safe to rerun: db/upsert-extracts! dedupes by normalized extract hash."
+(defn backfill-channel-extracts!
+  "Backfill extracts for a single channel by chunking messages and calling OpenAI.
+
+  SQLite-safe:
+  - reads messages via db/messages-for-channel
+  - chunks locally
+  - never recurs across try/catch"
   [guild-id channel-id & {:keys [chunk-size sleep-ms max-chunks debug?]
-                          :or {chunk-size 40
-                               sleep-ms 150
+                          :or {chunk-size 30
+                               sleep-ms 300
                                debug? false}}]
   (db/ensure-conn!)
-  (let [rows (db/messages-for-channel (str channel-id))
-        chunks (partition-all (long chunk-size) rows)]
-    (loop [i 0
-           chunks-left chunks
+  (let [messages (db/messages-for-channel channel-id)
+        rows (->> messages
+                  (map (fn [m]
+                         [(:message/ts m)
+                          (:message/author-name m)
+                          (:message/content m)
+                          (:message/id m)]))
+                  vec)
+        chunks0 (partition-all (long chunk-size) rows)
+        chunks  (cond->> chunks0
+                  max-chunks (take (long max-chunks)))]
+    (loop [xs (seq chunks)
+           i 0
            writes 0
-           failed 0]
-      (cond
-        (empty? chunks-left)
+           errors 0]
+      (if-not xs
         {:channel-id (str channel-id)
          :chunks i
          :extract-writes writes
-         :failed failed}
-
-        (and max-chunks (>= i (long max-chunks)))
-        {:channel-id (str channel-id)
-         :chunks i
-         :extract-writes writes
-         :failed failed
-         :stopped-at-max-chunks true}
-
-        :else
-        (let [chunk (first chunks-left)
-              transcript (chunk-transcript chunk)
-              packet {:guild-id (str guild-id)
-                      :channel-id (str channel-id)
-                      :chunk i
-                      :transcript transcript}]
-          (try
-            (let [raw (openai-edn! (instructions) (pr-str packet))
-                  parsed (safe-edn raw)
-                  extracts (normalize-extracts (:extract parsed))
-                  ok (when (seq extracts)
-                       (db/upsert-extracts!
-                        {:guild-id (str guild-id)
-                         :channel-id (str channel-id)
-                         :message-id (str "backfill-chunk-" i)
-                         :packet-id (str (java.util.UUID/randomUUID))
-                         :model (:model (openai-cfg))}
-                        extracts))]
-              (when (and debug? (:parse-failed? parsed))
-                (println "[extracts] parse failed; tolerated chunk" i))
-              (when (pos? (long sleep-ms))
-                (Thread/sleep (long sleep-ms)))
-              (recur (inc i)
-                     (rest chunks-left)
-                     (+ writes (if ok 1 0))
-                     failed))
-
-            (catch Throwable t
-              (println "[extracts] failed channel"
-                       channel-id
-                       "chunk"
-                       i
-                       "|"
-                       (.getMessage t)
-                       (or (ex-data t) {}))
-              (when (pos? (long sleep-ms))
-                (Thread/sleep (long sleep-ms)))
-              (recur (inc i)
-                     (rest chunks-left)
-                     writes
-                     (inc failed)))))))))
+         :errors errors}
+        (let [chunk (first xs)
+              result
+              (try
+                (let [transcript (chunk-transcript chunk)
+                      packet {:channel-id (str channel-id)
+                              :guild-id (str guild-id)
+                              :transcript transcript}
+                      raw (openai-edn! (instructions) (pr-str packet))
+                      m (try
+                          (safe-edn raw)
+                          (catch Throwable t
+                            (when debug?
+                              (println "\n--- backfill-channel-extracts! EDN PARSE FAILED ---")
+                              (println (subs (str raw) 0 (min 2000 (count (str raw)))))
+                              (println "--- /EDN PARSE FAILED ---\n"))
+                            (throw t)))
+                      extracts (vec (or (:extract m) []))
+                      ctx {:guild-id (str guild-id)
+                           :channel-id (str channel-id)
+                           :message-id (str "backfill-chunk-" i)
+                           :packet-id (str (java.util.UUID/randomUUID))
+                           :model (str (:model (openai-cfg)))}
+                      ok (when (seq extracts)
+                           (db/upsert-extracts! ctx extracts))]
+                  {:status (if ok :written :skipped)})
+                (catch Throwable t
+                  (println "extract backfill error:"
+                           {:channel-id (str channel-id)
+                            :chunk i
+                            :error (.getMessage t)
+                            :data (ex-data t)})
+                  {:status :error}))]
+          (when (pos? (long sleep-ms))
+            (Thread/sleep (long sleep-ms)))
+          (recur (next xs)
+                 (inc i)
+                 (if (= (:status result) :written) (inc writes) writes)
+                 (if (= (:status result) :error) (inc errors) errors)))))))
 
 (defn backfill-guild-extracts!
   "Build extract memories for every channel in a guild."

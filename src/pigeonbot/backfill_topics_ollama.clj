@@ -89,75 +89,69 @@
   (db/messages-for-channel (str channel-id)))
 
 (defn backfill-channel-topics!
-  "Backfill missing per-message topic tags for one channel.
+  "Backfill per-message topic tags for a channel using Ollama.
 
-  Skips messages that already have topics, so this is safe to rerun."
+  SQLite-safe and idempotent:
+  - reads messages via db/messages-for-channel
+  - skips messages already present in topics
+  - never recurs across try/catch"
   [channel-id {:keys [model ollama-url sleep-ms limit]
                :or {sleep-ms 100}}]
   (when-not (and (string? model) (seq model))
-    (throw (ex-info "backfill-channel-topics! requires :model"
-                    {:model model})))
-
+    (throw (ex-info "backfill-channel-topics! requires :model" {:model model})))
   (db/ensure-conn!)
-
-  (let [rows0 (message-rows-in-channel channel-id)
-        rows (cond->> rows0
-               limit (take (long limit)))]
-    (loop [xs rows
+  (let [rows0 (db/messages-for-channel channel-id)
+        rows  (cond->> rows0
+                limit (take (long limit)))]
+    (loop [xs (seq rows)
            seen 0
            written 0
            skipped 0
-           failed 0]
-      (if (empty? xs)
+           errors 0]
+      (if-not xs
         {:channel-id (str channel-id)
          :seen seen
          :written written
          :skipped skipped
-         :failed failed}
-
-        (let [{:keys [message/id
-                      message/content
-                      message/guild-id
-                      message/channel-id]} (first xs)
-              mid (str id)]
-          (if (db/topic-exists? mid)
-            (recur (rest xs)
-                   (inc seen)
-                   written
-                   (inc skipped)
-                   failed)
-
-            (try
-              (let [{:keys [topics]} (ollama-topics
-                                      {:ollama-url (or ollama-url default-ollama-url)
-                                       :model model
-                                       :text content})]
-                (when (seq topics)
-                  (db/upsert-message-topics!
-                   {:message-id mid
-                    :guild-id guild-id
-                    :channel-id channel-id
-                    :model (str "ollama:" model)
-                    :topics topics}))
-                (sleep! sleep-ms)
-                (recur (rest xs)
-                       (inc seen)
-                       (if (seq topics) (inc written) written)
-                       skipped
-                       failed))
-
-              (catch Throwable t
-                (println "[topics] failed message"
-                         mid
-                         "|"
-                         (.getMessage t)
-                         (or (ex-data t) {}))
-                (sleep! sleep-ms)
-                (recur (rest xs)
-                       (inc seen)
-                       written
-                       skipped
-                       (inc failed))))))))))
+         :errors errors}
+        (let [m (first xs)
+              mid (:message/id m)
+              txt (:message/content m)
+              gid (:message/guild-id m)
+              cid (:message/channel-id m)
+              result
+              (try
+                (if (db/topic-exists? mid)
+                  {:status :skipped}
+                  (let [res (ollama-topics {:ollama-url (or ollama-url default-ollama-url)
+                                            :model model
+                                            :text (str txt)})
+                        topics (normalize-topics (:topics res))]
+                    (if (seq topics)
+                      (do
+                        (db/upsert-message-topics!
+                         {:message-id mid
+                          :guild-id gid
+                          :channel-id cid
+                          :model (str "ollama:" model)
+                          :topics topics})
+                        {:status :written})
+                      {:status :skipped})))
+                (catch Throwable t
+                  (println "topic backfill error:"
+                           {:channel-id (str channel-id)
+                            :message-id (str mid)
+                            :error (.getMessage t)
+                            :data (ex-data t)})
+                  {:status :error}))]
+          (when (and (not= (:status result) :skipped)
+                     (pos? (long sleep-ms)))
+            (Thread/sleep (long sleep-ms)))
+          (recur (next xs)
+                 (inc seen)
+                 (if (= (:status result) :written) (inc written) written)
+                 (if (= (:status result) :skipped) (inc skipped) skipped)
+                 (if (= (:status result) :error) (inc errors) errors)))))))
 
 (defn backfill-guild-topics!
   "Backfill missing topics for every channel in a guild."
