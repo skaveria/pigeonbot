@@ -116,6 +116,7 @@
 (defn- slap-system-instructions []
   ["You are a SLAP responder."
    "You MUST output EDN only. Do not output any prose outside EDN."
+   "Your FIRST character must be { and your LAST character must be }. No markdown fences."
    "Output MUST be a single EDN map with keys:"
    "  :slap/version :packet/id :sufficient? :answer :extract :query-back :meta"
    "Use :slap/version \"0.1\"."
