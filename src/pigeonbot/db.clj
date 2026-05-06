@@ -808,43 +808,24 @@
 
 
 (defn search-messages
-
   "Compatibility helper for SLAP after SQLite migration.
-
   Searches SQLite FTS and returns pulled message maps."
-
   ([fts]
-
    (search-messages fts {}))
-
   ([fts {:keys [guild-id channel-id limit]
-
          :or {limit 25}}]
-
    (let [hits (fulltext fts {:limit limit})]
-
      (->> hits
-
           (keep (fn [[id attr _txt]]
-
                   (when (= attr :message/content)
-
                     (pull-message id))))
-
           (filter (fn [m]
-
                     (and
-
                      (or (nil? guild-id)
-
                          (= (str guild-id) (some-> (:message/guild-id m) str)))
-
                      (or (nil? channel-id)
-
                          (= (str channel-id) (some-> (:message/channel-id m) str))))))
-
           (take (long limit))
-
           vec))))
 
 (defn recent-messages
