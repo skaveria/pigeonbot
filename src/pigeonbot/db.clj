@@ -858,3 +858,23 @@
    {:tool :datalevin/fts
     :note "Compatibility name only; backed by SQLite FTS5."
     :shape "{:query/id \"q1\" :tool :datalevin/fts :query {:fts \"...\"} :expected {:limit 10} :purpose \"...\" :priority 1}"}})
+
+(defn messages-for-channel
+  "Compatibility helper for backfill namespaces.
+  Returns rows shaped as maps from SQLite messages."
+  [channel-id]
+  (query
+   "SELECT message_id, ts, guild_id, channel_id, author_id, author_name, bot, content
+    FROM messages
+    WHERE channel_id = ?
+    ORDER BY ts ASC"
+   [(str channel-id)]
+   (fn [rs]
+     {:message/id (.getString rs "message_id")
+      :message/ts (.getString rs "ts")
+      :message/guild-id (.getString rs "guild_id")
+      :message/channel-id (.getString rs "channel_id")
+      :message/author-id (.getString rs "author_id")
+      :message/author-name (.getString rs "author_name")
+      :message/bot? (pos? (.getInt rs "bot"))
+      :message/content (.getString rs "content")})))
