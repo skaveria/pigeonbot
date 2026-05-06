@@ -10,7 +10,7 @@
 ;; -----------------------------------------------------------------------------
 ;; SQLite config
 ;; -----------------------------------------------------------------------------
-
+(declare ensure-conn!)
 (def ^:private db-path "./data/pigeonbot.sqlite3")
 (def ^:private backup-dir "./data/backups")
 (def ^:private backup-every-ms (* 6 60 60 1000)) ;; 6 hours
