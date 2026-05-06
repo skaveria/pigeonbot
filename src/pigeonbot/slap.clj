@@ -3,41 +3,18 @@
             [clojure.string :as str]
             [org.httpkit.client :as http]
             [cheshire.core :as json]
-            [datalevin.core :as dlv]
             [pigeonbot.config :as config]
             [pigeonbot.context :as ctx]
             [pigeonbot.db :as db]))
 
-;; -----------------------------------------------------------------------------
-;; Small helpers
-;; -----------------------------------------------------------------------------
-
-(defn- new-id []
-  (str (java.util.UUID/randomUUID)))
-
-(defn- now-iso []
-  (str (java.time.Instant/now)))
-
-(defn- iso-or-str [x]
-  (cond
-    (instance? java.util.Date x)
-    (str (.toInstant ^java.util.Date x))
-
-    (instance? java.time.Instant x)
-    (str x)
-
-    :else
-    (str x)))
+(defn- new-id [] (str (java.util.UUID/randomUUID)))
+(defn- now-iso [] (.toString (java.time.Instant/now)))
 
 (defn- clamp-chars [s n]
   (let [s (str (or s ""))]
     (if (<= (count s) (long n))
       s
       (str (subs s 0 (max 0 (dec (long n)))) "…"))))
-
-;; -----------------------------------------------------------------------------
-;; OpenAI
-;; -----------------------------------------------------------------------------
 
 (defn- openai-cfg []
   (let [m (config/load-config)]
@@ -46,7 +23,7 @@
      :model    (or (:openai-model m) "gpt-5.5")
      :timeout  (long (or (:brain-timeout-ms m) 90000))
      :temperature (:openai-temperature m)
-     :max-output-tokens (or (:openai-max-output-tokens m) 1800)}))
+     :max-output-tokens (or (:openai-max-output-tokens m) 1200)}))
 
 (defn- endpoint [base path]
   (str (str/replace (or base "") #"/+$" "") path))
@@ -69,37 +46,35 @@
                          (let [content (:content item)]
                            (cond
                              (sequential? content)
-                             (->> content
-                                  (keep (fn [c]
-                                          (cond
-                                            (string? (:text c)) (:text c)
-                                            (string? (:output_text c)) (:output_text c)
-                                            :else nil))))
+                             (keep (fn [c]
+                                     (or (:text c)
+                                         (:output_text c)
+                                         (get-in c [:text :value])))
+                                   content)
 
                              (string? content)
                              [content]
 
-                             :else
-                             []))))
+                             :else []))))
                       (map str)
                       (remove str/blank?)
                       vec)]
        (when (seq texts) (str/join "" texts)))
+     (get-in m [:choices 0 :message :content])
      (get-in m [:error :message])
      (str resp-body))))
 
-(defn- openai-edn!
-  "Call OpenAI Responses API. The instructions request EDN, but parsing is lenient."
-  [instructions user-text]
+(defn- openai-edn! [instructions user-text]
   (let [{:keys [base-url api-key model timeout temperature max-output-tokens]} (openai-cfg)
         _ (when-not (and (string? api-key) (seq api-key))
             (throw (ex-info "Missing OpenAI API key" {})))
         ep (endpoint base-url "/v1/responses")
         payload (cond-> {:model model
-                         :instructions (str/join "\n" instructions)
+                         :instructions (str instructions)
                          :input (str user-text)
                          :max_output_tokens (long max-output-tokens)}
-                  (number? temperature) (assoc :temperature temperature))
+                  (number? temperature)
+                  (assoc :temperature temperature))
         headers {"Authorization" (str "Bearer " api-key)
                  "Content-Type" "application/json"}
         {:keys [status body error]}
@@ -116,161 +91,120 @@
       :else
       (-> (extract-output-text body) str str/trim))))
 
-;; -----------------------------------------------------------------------------
-;; Prompting
-;; -----------------------------------------------------------------------------
-
 (defn- slap-system-instructions []
-  ["You are a SLAP responder for pigeonbot."
-   ""
-   "CRITICAL FORMAT RULE:"
-   "Return ONLY one EDN map. No markdown. No prose. No code fence."
-   "The first non-whitespace character must be { and the last non-whitespace character must be }."
-   ""
-   "Output MUST be a single EDN map with keys:"
+  ["You are a SLAP responder."
+   "You MUST output EDN only."
+   "Output a single EDN map with keys:"
    "  :slap/version :packet/id :sufficient? :answer :extract :query-back :meta"
    "Use :slap/version \"0.1\"."
    ""
-   "IMPORTANT OUTPUT SHAPE:"
-   "- :sufficient? must be boolean true or false."
-   "- :answer must be a string."
-   "- :extract must be a vector, possibly empty."
-   "- :query-back must be a vector, possibly empty, never nil."
-   "- :meta must be a map, possibly empty."
+   "IMPORTANT: no markdown, no code fences, no prose outside EDN."
+   "If you accidentally need to explain uncertainty, put it inside :answer."
    ""
-   "Each extract item must be either:"
-   "  - a string, OR"
-   "  - a map with at least {:text \"...\"}."
+   ":extract must be a vector."
+   "Each extract item may be a string or a map."
+   "Map extracts should include :text :kind :confidence :tags."
    ""
-   "If you output an extract map, it MUST include:"
-   "  - :text (string)"
-   "  - :kind (keyword, e.g. :note/:fact/:decision/:todo)"
-   "  - :confidence (0.0–1.0)"
-   "  - :tags (vector of 3–8 strings)"
-   ""
-   "Tag rules:"
-   "  - lowercase"
-   "  - short tokens, no spaces; use hyphen if needed"
-   "  - prefer concrete nouns/models"
-   ""
-   "Evidence priority rules:"
-   "- Treat :temporal/recent/context as LOW-PRIORITY vibes only."
-   "- Prioritize :knowledge/evidence blocks over temporal context."
-   "- Use temporal context only if it directly matches the question."
-   "- Never cross guild boundaries."
-   ""
-   "Query-back:"
-   "- ONLY use tool :datalevin/fts."
-   "- Each query-back item should look like:"
+   ":query-back must be a vector."
+   "Use ONLY tool :datalevin/fts for compatibility, even though storage is now SQLite."
+   "Query-back item shape:"
    "{:query/id \"q1\" :tool :datalevin/fts :query {:fts \"...\"} :expected {:limit 10} :purpose \"...\" :priority 1}"
    ""
-   "Answer length:"
-   "- Default to a medium answer, around 6–10 sentences."
-   "- If simple, 3–6 sentences is fine."
-   "- Avoid filler."
+   "Evidence priority:"
+   "- Prefer :knowledge/evidence over :temporal."
+   "- Treat recent context as low-priority vibe unless directly relevant."
+   "- Never cross guild boundaries."
    ""
-   "If you cannot obey the EDN shape, still return EDN with :answer containing your best answer."
+   "Answer length:"
+   "- Usually 3–10 sentences."
+   "- Be concrete and useful."
+   ""
    "Never include secrets."])
 
 (defn- persona-instructions []
   (let [cfg (config/load-config)
         p (some-> (:persona-prompt cfg) str str/trim)]
-    (cond-> (vec (slap-system-instructions))
-      (seq p)
-      (into [""
-             "PERSONA:"
-             p
-             ""
-             "Style reminder: playful, sassy pigeon entity; avoid generic assistant tone."]))))
-
-;; -----------------------------------------------------------------------------
-;; Lenient EDN parsing / fallback for newer chatty models
-;; -----------------------------------------------------------------------------
+    (str/join
+     "\n"
+     (cond-> (vec (slap-system-instructions))
+       (seq p)
+       (into [""
+              "PERSONA:"
+              p
+              ""
+              "Style reminder: playful, sassy pigeon entity; avoid generic assistant tone."])))))
 
 (defn- strip-codefences [s]
   (-> (str (or s ""))
       (str/replace #"(?s)^\s*```[a-zA-Z0-9_-]*\s*" "")
       (str/replace #"(?s)\s*```\s*$" "")
-      (str/replace #"(?s)```[a-zA-Z0-9_-]*\s*" "")
-      (str/replace #"(?s)```" "")
       str/trim))
 
-(defn- try-edn-read [s]
+(defn- try-edn [s]
   (try
-    (edn/read-string {:readers {} :default (fn [_tag v] v)} s)
+    (edn/read-string {:readers {} :default (fn [_ v] v)} s)
     (catch Throwable _ nil)))
 
-(defn- balanced-map-snippets [s]
+(defn- best-edn-map-snippet [s]
   (let [s (str (or s ""))]
-    (loop [i 0
-           start nil
-           depth 0
-           out []]
-      (if (>= i (count s))
-        out
-        (let [ch (.charAt ^String s i)]
-          (cond
-            (= ch \{)
-            (recur (inc i) (or start i) (inc depth) out)
+    (when-let [ms (seq (re-seq #"(?s)\{.*\}" s))]
+      (last (sort-by count ms)))))
 
-            (= ch \})
-            (let [depth' (dec depth)]
-              (if (and start (zero? depth'))
-                (recur (inc i) nil 0 (conj out (subs s start (inc i))))
-                (recur (inc i) start (max 0 depth') out)))
+(defn- coerce-response-map [raw packet-id]
+  (let [raw (str (or raw ""))
+        s (strip-codefences raw)
+        parsed (or (try-edn s)
+                   (when-let [m (best-edn-map-snippet s)]
+                     (try-edn m)))]
+    (if (map? parsed)
+      parsed
+      {:slap/version "0.1"
+       :packet/id packet-id
+       :sufficient? true
+       :answer (str/trim raw)
+       :extract []
+       :query-back []
+       :meta {:coerced-non-edn? true}})))
 
-            :else
-            (recur (inc i) start depth out)))))))
+(defn- validate-response! [resp packet-id]
+  (let [resp (cond-> resp
+               (not (contains? resp :slap/version)) (assoc :slap/version "0.1")
+               (not (contains? resp :packet/id)) (assoc :packet/id packet-id)
+               (not (contains? resp :sufficient?)) (assoc :sufficient? true)
+               (not (contains? resp :answer)) (assoc :answer "")
+               (not (contains? resp :extract)) (assoc :extract [])
+               (not (contains? resp :query-back)) (assoc :query-back [])
+               (not (contains? resp :meta)) (assoc :meta {}))]
+    (assoc resp
+           :slap/version "0.1"
+           :packet/id packet-id
+           :extract (vec (or (:extract resp) []))
+           :query-back (vec (or (:query-back resp) []))
+           :meta (if (map? (:meta resp)) (:meta resp) {}))))
 
-(defn- safe-edn-read [s]
-  (let [raw (str (or s ""))
-        stripped (strip-codefences raw)
-        candidates (concat
-                    [stripped]
-                    (reverse (balanced-map-snippets stripped)))]
-    (some try-edn-read candidates)))
+(def ^:private stopwords
+  #{"the" "a" "an" "and" "or" "to" "of" "in" "on" "for" "with" "is" "it" "that"
+    "this" "be" "are" "was" "were" "as" "at" "by" "from" "but" "so" "if" "you"
+    "we" "i" "they" "he" "she" "them" "their" "our" "your" "its" "about" "what"
+    "saying" "said" "talking" "discuss" "discussion" "summarize" "quick" "test"
+    "tell" "me" "please" "could" "would" "should" "explain" "how" "does" "work"})
 
-(defn- fallback-slap-response [raw packet-id]
-  {:slap/version "0.1"
-   :packet/id packet-id
-   :sufficient? true
-   :answer (let [txt (-> raw strip-codefences str/trim)]
-             (if (str/blank? txt)
-               "brain-box made pigeon noises but no usable answer fell out."
-               (clamp-chars txt 1800)))
-   :extract []
-   :query-back []
-   :meta {:fallback/non-edn? true}})
-
-(defn- parse-slap-response [raw packet-id]
-  (if-let [parsed (safe-edn-read raw)]
-    parsed
-    (do
-      (println "SLAP WARN: non-EDN model output; using raw answer fallback.")
-      (fallback-slap-response raw packet-id))))
-
-(defn- validate-response!
-  [resp packet-id]
-  (when-not (map? resp)
-    (throw (ex-info "SLAP: response not a map" {:resp resp})))
-  (when-not (= "0.1" (:slap/version resp))
-    (throw (ex-info "SLAP: wrong version" {:got (:slap/version resp)})))
-  (when-not (= packet-id (:packet/id resp))
-    (throw (ex-info "SLAP: packet id mismatch" {:expected packet-id :got (:packet/id resp)})))
-  (doseq [k [:sufficient? :answer :extract :query-back :meta]]
-    (when-not (contains? resp k)
-      (throw (ex-info "SLAP: missing key" {:missing k :resp resp}))))
-  (when-not (vector? (:extract resp))
-    (throw (ex-info "SLAP: :extract must be vector" {:extract (:extract resp)})))
-  (when-not (vector? (:query-back resp))
-    (throw (ex-info "SLAP: :query-back must be vector" {:query-back (:query-back resp)})))
-  (when-not (map? (:meta resp))
-    (throw (ex-info "SLAP: :meta must be map" {:meta (:meta resp)})))
-  resp)
-
-;; -----------------------------------------------------------------------------
-;; Persona
-;; -----------------------------------------------------------------------------
+(defn- candidate-tags-from-question [s]
+  (let [s (-> (or s "") str/lower-case)
+        modelish-a (re-seq #"\b[a-z]{1,8}\d{1,8}[a-z]?\b" s)
+        modelish-b (re-seq #"\b\d{1,8}[a-z]{1,8}\b" s)
+        words (->> (re-seq #"[a-z]{3,}" s)
+                   (remove stopwords))
+        compounds (cond-> []
+                    (and (re-find #"\btrigger\b" s)
+                         (re-find #"\bguard\b" s))
+                    (conj "trigger-guard"))]
+    (->> (concat modelish-a modelish-b compounds words)
+         (map #(str/replace % #"[^a-z0-9\-]+" ""))
+         (remove str/blank?)
+         distinct
+         (take 12)
+         vec)))
 
 (defn- bot-persona []
   (let [cfg (config/load-config)]
@@ -281,260 +215,104 @@
      :persona/voice {:typing-indicator? true}
      :persona/prompt (:persona-prompt cfg)}))
 
-;; -----------------------------------------------------------------------------
-;; Tags
-;; -----------------------------------------------------------------------------
-
-(def ^:private stopwords
-  #{"the" "a" "an" "and" "or" "to" "of" "in" "on" "for" "with" "is" "it" "that"
-    "this" "be" "are" "was" "were" "as" "at" "by" "from" "but" "so" "if" "you"
-    "we" "i" "they" "he" "she" "them" "their" "our" "your" "its" "about" "what"
-    "saying" "said" "talking" "discuss" "discussion" "summarize" "quick" "test"
-    "tell" "me" "please" "could" "would" "should" "explain" "how" "does" "work"})
-
-(defn- candidate-tags-from-question
-  [s]
-  (let [s (-> (or s "") str/lower-case)
-        modelish-a (re-seq #"\b[a-z]{1,6}\d{1,6}[a-z]?\b" s)
-        modelish-b (re-seq #"\b\d{1,6}[a-z]{1,6}\b" s)
-        words (->> (re-seq #"[a-z]{3,}" s)
-                   (remove stopwords))
-        has-trigger (boolean (re-find #"\btrigger\b" s))
-        has-guard   (boolean (re-find #"\bguard\b" s))
-        compounds   (cond-> []
-                      (and has-trigger has-guard) (conj "trigger-guard"))
-        tags (->> (concat modelish-a modelish-b compounds words)
-                  (map #(str/replace % #"[^a-z0-9\-]+" ""))
-                  (remove str/blank?)
-                  distinct
-                  (take 12)
-                  vec)]
-    tags))
-
-;; -----------------------------------------------------------------------------
-;; Datalevin pulls
-;; -----------------------------------------------------------------------------
-
-(defn- pull-message [dbv eid]
-  (try
-    (dlv/pull dbv
-              [:message/id
-               :message/ts
-               :message/guild-id
-               :message/channel-id
-               :message/author-id
-               :message/author-name
-               :message/bot?
-               :message/content]
-              eid)
-    (catch Throwable _ nil)))
-
-(defn- recent-messages-from-db [msg]
-  (let [cfg (config/load-config)
-        n (long (or (:slap-recent-datalevin-limit cfg) 12))
-        cid (some-> (:channel-id msg) str)]
-    (if-not (seq cid)
-      []
-      (let [dbv (db/db)
-            rows (dlv/q '[:find ?ts ?author ?txt ?mid
-                          :in $ ?cid
-                          :where
-                          [?e :message/channel-id ?cid]
-                          [?e :message/ts ?ts]
-                          [?e :message/author-name ?author]
-                          [?e :message/content ?txt]
-                          [?e :message/id ?mid]]
-                        dbv cid)]
-        (->> rows
-             (sort-by first)
-             (take-last n)
-             (map (fn [[ts author txt mid]]
-                    {:message/id (str mid)
-                     :ts (str (iso-or-str ts))
-                     :author/name (str author)
-                     :content (str txt)
-                     :channel/id cid}))
-             vec)))))
-
 (defn- trimmed-recent-context [msg]
   (let [cfg (config/load-config)
         maxc (long (or (:slap-recent-context-chars cfg) 700))]
     (clamp-chars (ctx/context-text msg) maxc)))
 
-;; -----------------------------------------------------------------------------
-;; Evidence
-;; -----------------------------------------------------------------------------
+(defn- recent-messages-from-db [msg]
+  (let [cfg (config/load-config)
+        n (long (or (:slap-recent-datalevin-limit cfg) 12))
+        cid (some-> (:channel-id msg) str)]
+    (if (seq cid)
+      (db/recent-messages cid n)
+      [])))
 
 (defn- preseed-evidence [msg question]
   (let [cfg (config/load-config)
         limit (long (or (:slap-preseed-limit cfg) 25))
         q (-> (or question "") str str/trim)
         gid (some-> (:guild-id msg) str)
-        cid (some-> (:channel-id msg) str)]
-    (if (str/blank? q)
-      []
-      (let [hits (take limit (db/fulltext q))
-            eids (->> hits (map first) distinct vec)
-            dbv (db/db)
-            rows (->> eids
-                      (map (fn [eid] (pull-message dbv eid)))
-                      (remove nil?)
-                      (filter (fn [m]
-                                (cond
-                                  (seq gid) (= (some-> (:message/guild-id m) str) gid)
-                                  (seq cid) (= (some-> (:message/channel-id m) str) cid)
-                                  :else true)))
-                      vec)]
-        (if (seq rows)
-          [{:evidence/type :datalevin/preseed
-            :purpose (if (seq gid)
-                       "Top relevant chat messages from Datalevin for the current question, guild-wide."
-                       "Top relevant chat messages from Datalevin for the current question, channel-only.")
-            :fts q
-            :rows rows}]
-          [])))))
+        cid (some-> (:channel-id msg) str)
+        rows (when (seq q)
+               (db/search-messages q {:guild-id gid :channel-id nil :limit limit}))]
+    (if (seq rows)
+      [{:evidence/type :sqlite/preseed
+        :compat/type :datalevin/preseed
+        :purpose "Top relevant chat messages from SQLite FTS for the current question."
+        :fts q
+        :rows rows}]
+      [])))
 
 (defn- related-extract-evidence [msg question]
   (let [cfg (config/load-config)
         gid (some-> (:guild-id msg) str)
         limit (long (or (:slap-related-extract-limit cfg) 20))
-        tags (candidate-tags-from-question question)]
-    (if (or (not (seq gid)) (empty? tags))
-      []
-      (let [dbv (db/db)
-            rows (dlv/q
-                  '[:find ?eid ?txt ?tag ?cid
-                    :in $ ?gid [?tag ...]
-                    :where
-                    [?eid :extract/guild-id ?gid]
-                    [?eid :extract/text ?txt]
-                    [?eid :extract/tag ?tag]
-                    [?eid :extract/channel-id ?cid]]
-                  dbv gid tags)
-            grouped
-            (->> rows
-                 (group-by first)
-                 (map (fn [[eid rs]]
-                        (let [txt (nth (first rs) 1)
-                              matched (->> rs (map #(nth % 2)) distinct vec)
-                              cid (nth (first rs) 3)
-                              pulled (dlv/pull dbv
-                                               [:extract/ts :extract/kind :extract/confidence]
-                                               eid)
-                              ts (or (:extract/ts pulled) (java.util.Date.))
-                              kind (or (:extract/kind pulled) :note)
-                              conf (double (or (:extract/confidence pulled) 0.75))]
-                          {:extract/eid eid
-                           :extract/ts (str (iso-or-str ts))
-                           :extract/channel-id (str cid)
-                           :extract/text txt
-                           :extract/kind kind
-                           :extract/confidence conf
-                           :extract/matched-tags matched
-                           :extract/overlap (count matched)})))
-                 (sort-by (fn [m] [(- (:extract/overlap m)) (:extract/ts m)]))
-                 (take limit)
-                 vec)]
-        (if (seq grouped)
-          [{:evidence/type :datalevin/extract-related
-            :purpose "Related prior extracts in this guild matched by tag overlap."
-            :tags tags
-            :rows grouped}]
-          [])))))
+        tags (candidate-tags-from-question question)
+        rows (when (and (seq gid) (seq tags))
+               (db/related-extracts-by-tags gid tags {:limit limit}))]
+    (if (seq rows)
+      [{:evidence/type :sqlite/extract-related
+        :compat/type :datalevin/extract-related
+        :purpose "Related prior extracts in this guild matched by tag overlap."
+        :tags tags
+        :rows rows}]
+      [])))
 
 (defn- topic-related-message-evidence [msg question]
   (let [cfg (config/load-config)
         gid (some-> (:guild-id msg) str)
         limit (long (or (:slap-topic-related-limit cfg) 20))
-        topics (candidate-tags-from-question question)]
-    (if (or (not (seq gid)) (empty? topics))
-      []
-      (let [dbv (db/db)
-            mids (->> (dlv/q '[:find ?mid
-                               :in $ ?gid [?topic ...]
-                               :where
-                               [?t :topic/guild-id ?gid]
-                               [?t :topic/message-id ?mid]
-                               [?t :topic/topic ?topic]]
-                             dbv gid topics)
-                      (map first)
-                      distinct
-                      vec)
-            rows (->> mids
-                      (map (fn [mid]
-                             (first
-                              (dlv/q '[:find ?ts ?author ?txt ?cid
-                                       :in $ ?mid
-                                       :where
-                                       [?e :message/id ?mid]
-                                       [?e :message/ts ?ts]
-                                       [?e :message/author-name ?author]
-                                       [?e :message/content ?txt]
-                                       [?e :message/channel-id ?cid]]
-                                     dbv (str mid)))))
-                      (remove nil?)
-                      (sort-by first)
-                      (take-last limit)
-                      (map (fn [[ts author txt cid]]
-                             {:message/ts (str (iso-or-str ts))
-                              :message/author-name (str author)
-                              :message/content (str txt)
-                              :message/channel-id (str cid)}))
-                      vec)]
-        (if (seq rows)
-          [{:evidence/type :datalevin/topic-related
-            :purpose "Guild-wide messages matched by Ollama topic overlap."
-            :topics topics
-            :rows rows}]
-          [])))))
+        topics (candidate-tags-from-question question)
+        rows (when (and (seq gid) (seq topics))
+               (db/messages-by-topics gid topics {:limit limit}))]
+    (if (seq rows)
+      [{:evidence/type :sqlite/topic-related
+        :compat/type :datalevin/topic-related
+        :purpose "Guild-wide messages matched by topic overlap."
+        :topics topics
+        :rows rows}]
+      [])))
 
 (defn- repo-preseed-evidence [question]
   (let [cfg (config/load-config)
         limit (long (or (:slap-repo-preseed-limit cfg) 6))
         snip (long (or (:slap-repo-snippet-chars cfg) 900))
-        q (-> (or question "") str str/trim)]
-    (if (str/blank? q)
-      []
-      (let [rows (db/repo-search q {:limit limit :snippet-chars snip :min-score 2})]
-        (if (seq rows)
-          [{:evidence/type :datalevin/repo-preseed
-            :purpose "Relevant repo files retrieved from local indexed repo."
-            :query q
-            :rows rows}]
-          [])))))
+        q (-> (or question "") str str/trim)
+        rows (when (seq q)
+               (db/repo-search q {:limit limit :snippet-chars snip :min-score 2}))]
+    (if (seq rows)
+      [{:evidence/type :sqlite/repo-preseed
+        :compat/type :datalevin/repo-preseed
+        :purpose "Relevant repo files retrieved from local indexed repo."
+        :query q
+        :rows rows}]
+      [])))
 
-(defn- vocab-padding-evidence [msg question]
+(defn- vocab-padding-evidence [msg _question]
   (let [cfg (config/load-config)
         enabled? (not= false (:slap-vocab-enabled? cfg))
         limit (long (or (:slap-vocab-limit cfg) 25))
-        gid (some-> (:guild-id msg) str)
-        tags (candidate-tags-from-question question)]
-    (if (or (not enabled?) (not (seq gid)) (empty? tags))
-      []
-      (let [top-extract-tags (db/top-extract-tags gid {:limit limit})
-            top-topic-tags   (db/top-topic-tags gid {:limit limit})]
-        (if (or (seq top-extract-tags) (seq top-topic-tags))
-          [{:evidence/type :datalevin/vocab
+        gid (some-> (:guild-id msg) str)]
+    (if (and enabled? (seq gid))
+      (let [extract-tags (db/top-extract-tags gid {:limit limit})
+            topic-tags (db/top-topic-tags gid {:limit limit})]
+        (if (or (seq extract-tags) (seq topic-tags))
+          [{:evidence/type :sqlite/vocab
             :purpose "Vocabulary hints: common tags/topics in this guild."
             :guild/id gid
-            :top/extract-tags top-extract-tags
-            :top/topic-tags top-topic-tags}]
-          [])))))
+            :top/extract-tags extract-tags
+            :top/topic-tags topic-tags}]
+          []))
+      [])))
 
-;; -----------------------------------------------------------------------------
-;; Packet builder
-;; -----------------------------------------------------------------------------
-
-(defn- build-request
-  [{:keys [packet-id conversation-id depth msg evidence]}]
+(defn- build-request [{:keys [packet-id conversation-id depth msg evidence]}]
   (let [{:keys [channel-id guild-id id content author]} msg
         author-id (some-> (or (:id author) (get-in author [:user :id])) str)
         author-name (or (:global_name author)
                         (:username author)
                         (get-in author [:user :username])
-                        "unknown")
-        capabilities (db/slap-capabilities {:guild-id (some-> guild-id str)
-                                             :channel-id (some-> channel-id str)})]
+                        "unknown")]
     {:slap/version "0.1"
      :packet/id packet-id
      :conversation/id (or conversation-id packet-id)
@@ -552,14 +330,11 @@
                                    :author/name author-name
                                    :content (str (or content ""))}]
                 :recent/context (trimmed-recent-context msg)
-                :recent/datalevin (recent-messages-from-db msg)}
-     :knowledge {:capabilities capabilities
+                :recent/sqlite (recent-messages-from-db msg)}
+     :knowledge {:capabilities (db/slap-capabilities {:guild-id guild-id
+                                                       :channel-id channel-id})
                  :evidence (vec evidence)}
      :task {:goal "Answer the user's message using available evidence. If insufficient, request query-back."}}))
-
-;; -----------------------------------------------------------------------------
-;; Query-back
-;; -----------------------------------------------------------------------------
 
 (defn- fts-evidence [msg item]
   (let [qid (or (:query/id item) (new-id))
@@ -567,20 +342,11 @@
         q (or (get-in item [:query :fts]) "")
         limit (long (or (get-in item [:expected :limit]) 10))
         gid (some-> (:guild-id msg) str)
-        cid (some-> (:channel-id msg) str)
-        hits (take limit (db/fulltext q))
-        eids (->> hits (map first) distinct vec)
-        dbv (db/db)
-        rows (->> eids
-                  (map (fn [eid] (pull-message dbv eid)))
-                  (remove nil?)
-                  (filter (fn [m]
-                            (cond
-                              (seq gid) (= (some-> (:message/guild-id m) str) gid)
-                              (seq cid) (= (some-> (:message/channel-id m) str) cid)
-                              :else true)))
-                  vec)]
-    {:evidence/type :datalevin/fts
+        rows (if (seq q)
+               (db/search-messages q {:guild-id gid :limit limit})
+               [])]
+    {:evidence/type :sqlite/fts
+     :compat/type :datalevin/fts
      :query/id qid
      :purpose purpose
      :fts q
@@ -588,46 +354,40 @@
 
 (defn- run-query-back [msg query-back]
   (->> (or query-back [])
-       (sort-by (fn [q] (or (:priority q) 999)))
+       (sort-by #(or (:priority %) 999))
        (mapcat
         (fn [q]
           (case (:tool q)
             :datalevin/fts [(fts-evidence msg q)]
+            :sqlite/fts [(fts-evidence msg q)]
             [])))
        vec))
 
 (defn- auto-query-back [question]
   (let [q (-> (or question "") str str/trim)
         tags (candidate-tags-from-question q)
-        tag-q (when (seq tags)
-                (->> tags (take 6) (str/join " ")))
+        tag-q (when (seq tags) (str/join " " (take 6 tags)))
         words (->> (re-seq #"[A-Za-z0-9][A-Za-z0-9\-\_]{2,}" q)
                    (map str/lower-case)
                    (remove stopwords)
                    (take 8)
-                   vec)
-        phrase-q (when (seq words)
-                   (str "\"" (str/join " " (take 5 words)) "\""))]
+                   vec)]
     (->> [(when (seq tag-q)
             {:query/id "auto1"
              :tool :datalevin/fts
              :query {:fts tag-q}
              :expected {:limit 12}
-             :purpose "Auto recursion: search concrete tokens/models from the question."
+             :purpose "Auto recursion: search concrete tokens from the question."
              :priority 1})
-          (when (seq phrase-q)
+          (when (seq words)
             {:query/id "auto2"
              :tool :datalevin/fts
-             :query {:fts phrase-q}
+             :query {:fts (str/join " " words)}
              :expected {:limit 10}
-             :purpose "Auto recursion: search a tighter quoted phrase."
+             :purpose "Auto recursion: search important words from the question."
              :priority 2})]
          (remove nil?)
          vec)))
-
-;; -----------------------------------------------------------------------------
-;; Extract normalization
-;; -----------------------------------------------------------------------------
 
 (defn- normalize-extract-item [x]
   (cond
@@ -638,8 +398,8 @@
       (when (seq s) s))
 
     (map? x)
-    (let [txt (or (:text x) (:content x) (:extract/text x) (:extract/content x))
-          txt (some-> txt str str/trim)
+    (let [txt (some-> (or (:text x) (:content x) (:extract/text x) (:extract/content x))
+                      str str/trim)
           kind (or (:kind x) (:extract/kind x) :note)
           conf (double (or (:confidence x) (:extract/confidence x) 0.75))
           tags (or (:tags x) (:extract/tags x) [])]
@@ -654,23 +414,20 @@
        (remove nil?)
        vec))
 
-;; -----------------------------------------------------------------------------
-;; Public API
-;; -----------------------------------------------------------------------------
+(defn- seed-evidence [msg question]
+  (vec (concat
+        (related-extract-evidence msg question)
+        (topic-related-message-evidence msg question)
+        (vocab-padding-evidence msg question)
+        (repo-preseed-evidence question)
+        (preseed-evidence msg question))))
 
-(defn build-first-packet
-  "REPL helper: show the exact first request packet with evidence seed."
-  [msg]
+(defn build-first-packet [msg]
   (db/ensure-conn!)
   (let [packet-id (new-id)
         conversation-id (new-id)
         question (str (or (:content msg) ""))
-        seed (vec (concat
-                   (related-extract-evidence msg question)
-                   (topic-related-message-evidence msg question)
-                   (vocab-padding-evidence msg question)
-                   (repo-preseed-evidence question)
-                   (preseed-evidence msg question)))]
+        seed (seed-evidence msg question)]
     (build-request {:packet-id packet-id
                     :conversation-id conversation-id
                     :depth 0
@@ -688,19 +445,13 @@
          packet-id (new-id)
          conversation-id (new-id)
          question (str (or (:content msg) ""))
-         seed (vec (concat
-                    (related-extract-evidence msg question)
-                    (topic-related-message-evidence msg question)
-                    (vocab-padding-evidence msg question)
-                    (repo-preseed-evidence question)
-                    (preseed-evidence msg question)))
          write-ctx {:guild-id (:guild-id msg)
                     :channel-id (:channel-id msg)
                     :message-id (:id msg)
                     :packet-id packet-id
                     :model (str model)}]
      (loop [depth 0
-            evidence seed
+            evidence (seed-evidence msg question)
             queries-used 0]
        (let [req (build-request {:packet-id packet-id
                                  :conversation-id conversation-id
@@ -709,7 +460,7 @@
                                  :evidence evidence})
              raw (openai-edn! (persona-instructions) (pr-str req))
              resp0 (-> raw
-                       (parse-slap-response packet-id)
+                       (coerce-response-map packet-id)
                        (validate-response! packet-id))
              ex (normalize-extracts (:extract resp0))
              qb0 (vec (or (:query-back resp0) []))
@@ -720,7 +471,6 @@
                   qb0)
              resp (assoc resp0 :extract ex :query-back qb)
              sufficient? (true? (:sufficient? resp))]
-
          (try
            (db/upsert-extracts! write-ctx ex)
            (catch Throwable t
@@ -746,4 +496,4 @@
                {:answer (str (:answer resp)) :resp resp :depth depth}
                (recur (inc depth)
                       (into (vec evidence) new-evidence)
-                      (+ queries-used qb-count))))))))))
+                      (+ queries-used qb-count)))))))))))

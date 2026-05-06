@@ -1,420 +1,272 @@
 (ns pigeonbot.db
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [datalevin.core :as d]))
-
-(def ^:private db-path "./data/pigeonbot-db")
-
-(def ^:private schema
-  {;; -------------------------
-   ;; SPINE: raw messages
-   ;; -------------------------
-   :message/id           {:db/unique :db.unique/identity}
-   :message/ts           {:db/valueType :db.type/instant :db/index true}
-   :message/guild-id     {:db/valueType :db.type/string  :db/index true}
-   :message/channel-id   {:db/valueType :db.type/string  :db/index true}
-   :message/channel-type {:db/valueType :db.type/long    :db/index true}
-   :message/author-id    {:db/valueType :db.type/string  :db/index true}
-   :message/author-name  {:db/valueType :db.type/string  :db/index true}
-   :message/bot?         {:db/valueType :db.type/boolean :db/index true}
-   :message/content      {:db/valueType :db.type/string  :db/fulltext true}
-
-   ;; -------------------------
-   ;; META: derived annotations (mechanical)
-   ;; -------------------------
-   :meta/message-id       {:db/unique :db.unique/identity
-                           :db/valueType :db.type/string :db/index true}
-   :meta/ts               {:db/valueType :db.type/instant :db/index true}
-   :meta/guild-id         {:db/valueType :db.type/string  :db/index true}
-   :meta/channel-id       {:db/valueType :db.type/string  :db/index true}
-   :meta/author-id        {:db/valueType :db.type/string  :db/index true}
-   :meta/bot?             {:db/valueType :db.type/boolean :db/index true}
-   :meta/is-command?      {:db/valueType :db.type/boolean :db/index true}
-   :meta/has-attachments? {:db/valueType :db.type/boolean :db/index true}
-   :meta/has-links?       {:db/valueType :db.type/boolean :db/index true}
-   :meta/reply-to-id      {:db/valueType :db.type/string  :db/index true}
-   :meta/char-count       {:db/valueType :db.type/long    :db/index true}
-   :meta/word-count       {:db/valueType :db.type/long    :db/index true}
-   :meta/mention-ids      {:db/valueType :db.type/string
-                           :db/cardinality :db.cardinality/many
-                           :db/index true}
-   :meta/attachment-urls  {:db/valueType :db.type/string
-                           :db/cardinality :db.cardinality/many
-                           :db/index true}
-
-   ;; -------------------------
-   ;; EXTRACTS: SLAP writeback (semantic memory)
-   ;; -------------------------
-   :extract/id            {:db/unique :db.unique/identity
-                           :db/valueType :db.type/string :db/index true}
-
-   ;; de-dupe key
-   :extract/hash          {:db/unique :db.unique/identity
-                           :db/valueType :db.type/string :db/index true}
-
-   :extract/ts            {:db/valueType :db.type/instant :db/index true}
-   :extract/last-seen     {:db/valueType :db.type/instant :db/index true}
-   :extract/seen-count    {:db/valueType :db.type/long    :db/index true}
-
-   :extract/text          {:db/valueType :db.type/string  :db/fulltext true}
-   :extract/kind          {:db/valueType :db.type/keyword :db/index true}
-   :extract/confidence    {:db/valueType :db.type/double  :db/index true}
-   :extract/scope         {:db/valueType :db.type/keyword :db/index true}
-   :extract/guild-id      {:db/valueType :db.type/string  :db/index true}
-   :extract/channel-id    {:db/valueType :db.type/string  :db/index true}
-   :extract/message-id    {:db/valueType :db.type/string  :db/index true}
-   :extract/packet-id     {:db/valueType :db.type/string  :db/index true}
-   :extract/model         {:db/valueType :db.type/string  :db/index true}
-
-   ;; Correct tag storage: one datom per tag
-   :extract/tag           {:db/valueType :db.type/string
-                           :db/cardinality :db.cardinality/many
-                           :db/index true}
-
-   ;; Legacy (do not write going forward)
-   :extract/tags          {:db/valueType :db.type/string  :db/index true}
-
-   ;; -------------------------
-   ;; REPO: indexed source files (repo-only)
-   ;; -------------------------
-   :repo/path   {:db/unique :db.unique/identity :db/valueType :db.type/string :db/index true}
-   :repo/sha    {:db/valueType :db.type/string :db/index true}
-   :repo/ts     {:db/valueType :db.type/instant :db/index true}
-   :repo/bytes  {:db/valueType :db.type/long :db/index true}
-   :repo/kind   {:db/valueType :db.type/keyword :db/index true}
-   :repo/text   {:db/valueType :db.type/string :db/fulltext true}
-
-   ;; -------------------------
-   ;; TOPICS: per-message topic tags (separate from spine)
-   ;; -------------------------
-   :topic/message-id      {:db/unique :db.unique/identity
-                           :db/valueType :db.type/string :db/index true}
-   :topic/ts              {:db/valueType :db.type/instant :db/index true}
-   :topic/guild-id        {:db/valueType :db.type/string  :db/index true}
-   :topic/channel-id      {:db/valueType :db.type/string  :db/index true}
-   :topic/model           {:db/valueType :db.type/string  :db/index true}
-   :topic/topic           {:db/valueType :db.type/string
-                           :db/cardinality :db.cardinality/many
-                           :db/index true}})
+            [pigeonbot.config :as config])
+  (:import (java.sql DriverManager PreparedStatement)
+           (java.time Instant)
+           (java.util Date UUID)))
 
 (defonce ^:private conn* (atom nil))
+(defonce ^:private write-count* (atom 0))
+(defonce ^:private last-backup-ms* (atom 0))
 
-(defn- now-stamp []
-  (.format (java.time.format.DateTimeFormatter/ofPattern "yyyyMMdd-HHmmss")
-           (java.time.LocalDateTime/now)))
+(defn- cfg []
+  (let [m (config/load-config)]
+    {:db-path (or (:sqlite-db-path m) "./data/pigeonbot.sqlite3")
+     :backup-dir (or (:sqlite-backup-dir m) "./data/sqlite-backups")
+     :backup-every-writes (long (or (:sqlite-backup-every-writes m) 5000))
+     :backup-every-ms (long (or (:sqlite-backup-every-ms m) (* 30 60 1000)))}))
 
-(defn- quarantine-db-dir!
-  "Move db-path to a timestamped BAD dir. Best-effort."
-  [db-path]
-  (try
-    (let [src (io/file db-path)
-          parent (.getParentFile src)
-          name (.getName src)
-          dst (io/file parent (str name ".BAD-" (now-stamp)))]
-      (when (.exists src)
-        (.mkdirs parent)
-        (when-not (.renameTo src dst)
-          ;; fallback: if rename fails, try copy+delete would be more code;
-          ;; for now, at least don't crash hard.
-          (println "[pigeonbot.db] WARN: failed to rename DB dir" (.getAbsolutePath src) "->" (.getAbsolutePath dst)))))
-    (catch Throwable t
-      (println "[pigeonbot.db] WARN: quarantine failed:" (.getMessage t))))
-  true)
+(defn- now-ms [] (System/currentTimeMillis))
+(defn- now-iso [] (.toString (Instant/now)))
 
-(defn ensure-conn!
-  "Open Datalevin connection, auto-recovering from common LMDB/fulltext corruption.
+(defn- date->iso [x]
+  (cond
+    (instance? Date x) (.toString (.toInstant ^Date x))
+    (instance? Instant x) (.toString ^Instant x)
+    (string? x) x
+    :else (now-iso)))
 
-  If open fails with a datalevin/terms iterator error, we quarantine the DB dir and
-  recreate a fresh one so the bot can boot."
-  []
+(defn- bool->int [x] (if x 1 0))
+(defn- int->bool [x] (boolean (and x (not= 0 (long x)))))
+
+(defn- set-param! [^PreparedStatement ps idx v]
+  (cond
+    (nil? v) (.setObject ps idx nil)
+    (keyword? v) (.setString ps idx (name v))
+    (instance? Date v) (.setString ps idx (date->iso v))
+    (instance? Instant v) (.setString ps idx (date->iso v))
+    (boolean? v) (.setLong ps idx (bool->int v))
+    :else (.setObject ps idx v)))
+
+(defn- exec!
+  [sql & params]
+  (let [c @conn*]
+    (with-open [ps (.prepareStatement c sql)]
+      (doseq [[idx v] (map-indexed vector params)]
+        (set-param! ps (inc idx) v))
+      (.executeUpdate ps))))
+
+(defn- query!
+  [sql & params]
+  (let [c @conn*]
+    (with-open [ps (.prepareStatement c sql)]
+      (doseq [[idx v] (map-indexed vector params)]
+        (set-param! ps (inc idx) v))
+      (with-open [rs (.executeQuery ps)]
+        (let [md (.getMetaData rs)
+              n (.getColumnCount md)]
+          (loop [out []]
+            (if-not (.next rs)
+              out
+              (let [row (into {}
+                              (for [i (range 1 (inc n))]
+                                [(keyword (.getColumnLabel md i))
+                                 (.getObject rs i)]))]
+                (recur (conj out row))))))))))
+
+(defn- scalar
+  [sql & params]
+  (some-> (apply query! sql params) first vals first))
+
+(defn- mkdir-parent! [path]
+  (when-let [p (.getParentFile (io/file path))]
+    (.mkdirs p)))
+
+(defn- init-schema! []
+  (doseq [sql
+          ["PRAGMA journal_mode=WAL"
+           "PRAGMA synchronous=NORMAL"
+           "PRAGMA busy_timeout=10000"
+           "PRAGMA foreign_keys=ON"
+
+           "CREATE TABLE IF NOT EXISTS messages (
+              message_id TEXT PRIMARY KEY,
+              ts TEXT,
+              guild_id TEXT,
+              channel_id TEXT,
+              channel_type INTEGER,
+              author_id TEXT,
+              author_name TEXT,
+              bot INTEGER DEFAULT 0,
+              content TEXT DEFAULT ''
+            )"
+
+           "CREATE VIRTUAL TABLE IF NOT EXISTS message_fts
+              USING fts5(message_id UNINDEXED, content)"
+
+           "CREATE TABLE IF NOT EXISTS message_meta (
+              message_id TEXT PRIMARY KEY,
+              ts TEXT,
+              guild_id TEXT,
+              channel_id TEXT,
+              author_id TEXT,
+              bot INTEGER DEFAULT 0,
+              is_command INTEGER DEFAULT 0,
+              has_attachments INTEGER DEFAULT 0,
+              has_links INTEGER DEFAULT 0,
+              reply_to_id TEXT,
+              char_count INTEGER DEFAULT 0,
+              word_count INTEGER DEFAULT 0
+            )"
+
+           "CREATE TABLE IF NOT EXISTS meta_mentions (
+              message_id TEXT,
+              mention_id TEXT,
+              PRIMARY KEY (message_id, mention_id)
+            )"
+
+           "CREATE TABLE IF NOT EXISTS meta_attachments (
+              message_id TEXT,
+              url TEXT,
+              PRIMARY KEY (message_id, url)
+            )"
+
+           "CREATE TABLE IF NOT EXISTS extracts (
+              extract_id TEXT PRIMARY KEY,
+              hash TEXT UNIQUE,
+              ts TEXT,
+              last_seen TEXT,
+              seen_count INTEGER DEFAULT 1,
+              text TEXT DEFAULT '',
+              kind TEXT DEFAULT 'note',
+              confidence REAL DEFAULT 0.75,
+              scope TEXT DEFAULT 'channel',
+              guild_id TEXT,
+              channel_id TEXT,
+              message_id TEXT,
+              packet_id TEXT,
+              model TEXT
+            )"
+
+           "CREATE VIRTUAL TABLE IF NOT EXISTS extract_fts
+              USING fts5(extract_id UNINDEXED, text)"
+
+           "CREATE TABLE IF NOT EXISTS extract_tags (
+              extract_id TEXT,
+              tag TEXT,
+              PRIMARY KEY (extract_id, tag)
+            )"
+
+           "CREATE TABLE IF NOT EXISTS topics (
+              message_id TEXT PRIMARY KEY,
+              ts TEXT,
+              guild_id TEXT,
+              channel_id TEXT,
+              model TEXT
+            )"
+
+           "CREATE TABLE IF NOT EXISTS topic_tags (
+              message_id TEXT,
+              topic TEXT,
+              PRIMARY KEY (message_id, topic)
+            )"
+
+           "CREATE TABLE IF NOT EXISTS repo_files (
+              path TEXT PRIMARY KEY,
+              sha TEXT,
+              ts TEXT,
+              bytes INTEGER DEFAULT 0,
+              kind TEXT DEFAULT 'txt',
+              text TEXT DEFAULT ''
+            )"
+
+           "CREATE VIRTUAL TABLE IF NOT EXISTS repo_fts
+              USING fts5(path UNINDEXED, text)"
+
+           "CREATE INDEX IF NOT EXISTS idx_messages_guild_channel ON messages(guild_id, channel_id)"
+           "CREATE INDEX IF NOT EXISTS idx_extracts_guild_channel ON extracts(guild_id, channel_id)"
+           "CREATE INDEX IF NOT EXISTS idx_topics_guild_channel ON topics(guild_id, channel_id)"
+           "CREATE INDEX IF NOT EXISTS idx_extract_tags_tag ON extract_tags(tag)"
+           "CREATE INDEX IF NOT EXISTS idx_topic_tags_topic ON topic_tags(topic)"]]
+    (exec! sql)))
+
+(defn ensure-conn! []
   (or @conn*
-      (let [dir (io/file db-path)]
-        (.mkdirs dir)
-        (try
-          (reset! conn* (d/create-conn db-path schema))
-          @conn*
-          (catch Throwable t
-            (let [msg (str (.getMessage t))
-                  ed  (try (ex-data t) (catch Throwable _ nil))
-                  ;; This is the signature you pasted:
-                  ;; {:dbi datalevin/terms, :k-range [:all-back], ...}
-                  terms? (or (and (map? ed) (= "datalevin/terms" (str (:dbi ed))))
-                             (and (map? ed) (= :datalevin/terms (:dbi ed)))
-                             (str/includes? msg "datalevin/terms")
-                             (str/includes? msg "Native iterator returns error code"))]
-              (println "[pigeonbot.db] ERROR opening DB:" msg (or ed {}))
-              (when terms?
-                (println "[pigeonbot.db] Detected corrupted fulltext terms index; quarantining DB and recreating.")
-                (reset! conn* nil)
-                (quarantine-db-dir! db-path)
-                (.mkdirs (io/file db-path))
-                (reset! conn* (d/create-conn db-path schema))
-                @conn*)
-              (when-not terms?
-                (throw t))))))))
+      (let [{:keys [db-path]} (cfg)]
+        (Class/forName "org.sqlite.JDBC")
+        (mkdir-parent! db-path)
+        (reset! conn* (DriverManager/getConnection (str "jdbc:sqlite:" db-path)))
+        (init-schema!)
+        @conn*)))
 
 (defn close! []
   (when-let [c @conn*]
-    (try (d/close c) (catch Throwable _))
+    (try (.close c) (catch Throwable _))
     (reset! conn* nil))
   true)
 
-
 (defn db []
-  (d/db (ensure-conn!)))
+  (ensure-conn!))
 
-(defn- parse-discord-ts->date [s]
-  (when (and (string? s) (seq s))
-    (try (java.util.Date/from (java.time.Instant/parse s))
-         (catch Throwable _ nil))))
+(defn backup! []
+  (ensure-conn!)
+  (let [{:keys [db-path backup-dir]} (cfg)
+        ts (-> (now-iso)
+               (str/replace #":" "")
+               (str/replace #"\..*$" "")
+               (str/replace #"T" "-"))
+        src (io/file db-path)
+        dst-dir (io/file backup-dir)
+        dst (io/file dst-dir (str "pigeonbot-" ts ".sqlite3"))]
+    (.mkdirs dst-dir)
+    (try (exec! "PRAGMA wal_checkpoint(PASSIVE)") (catch Throwable _))
+    (when (.exists src)
+      (io/copy src dst))
+    {:backup (str dst)}))
+
+(defn- maybe-backup! []
+  (let [{:keys [backup-every-writes backup-every-ms]} (cfg)
+        wc (swap! write-count* inc)
+        now (now-ms)
+        last @last-backup-ms*]
+    (when (or (zero? (mod wc backup-every-writes))
+              (> (- now last) backup-every-ms))
+      (reset! last-backup-ms* now)
+      (try
+        (backup!)
+        (catch Throwable t
+          (println "[pigeonbot.db] backup failed:" (.getMessage t)))))))
 
 (defn- normalize-author [msg]
   (let [a (:author msg)
-        bot? (true? (:bot a))
         name (or (:global_name a)
                  (:username a)
                  (get-in a [:user :username])
                  "unknown")
         author-id (or (:id a) (get-in a [:user :id]))]
     {:author-name (str name)
-     :author-id   (some-> author-id str)
-     :bot?        bot?}))
+     :author-id (some-> author-id str)
+     :bot? (true? (:bot a))}))
 
-(defn- drop-nils [m]
-  (into {} (remove (comp nil? val)) m))
+(defn- clean-content [s]
+  (-> (or s "") str (str/replace #"\u0000" "") str/trim))
 
-(defn- now-date [] (java.util.Date.))
-
-;; -----------------------------------------------------------------------------
-;; Capabilities summary for SLAP (schema awareness)
-;; -----------------------------------------------------------------------------
-
-(defn slap-capabilities
-  "Return a small schema/capabilities summary for the SLAP packet.
-
-  Intentionally short and practical: tells the model what exists and what to query.
-  Accepts {:guild-id \"...\" :channel-id \"...\"} for display only."
-  [{:keys [guild-id channel-id]}]
-  {:scope {:guild/id (some-> guild-id str)
-           :channel/id (some-> channel-id str)}
-   :entities
-   [{:entity :message
-     :purpose "Raw Discord messages (spine)."
-     :fulltext [:message/content]
-     :indexed  [:message/guild-id :message/channel-id :message/ts :message/author-name :message/bot?]
-     :notes ["Use :datalevin/fts against message content to pull prior chat context."
-             "Filter to same guild-id by default; channel-id is optional if you want local focus."]}
-    {:entity :extract
-     :purpose "Semantic memory (SLAP writeback)."
-     :fulltext [:extract/text]
-     :indexed  [:extract/guild-id :extract/channel-id :extract/kind :extract/confidence :extract/ts]
-     :tags     {:attr :extract/tag :cardinality :many}
-     :notes ["Tag overlap on :extract/tag is the best fast path for recall."
-             "If tags fail, use :datalevin/fts for phrases that should appear in :extract/text."]}
-    {:entity :topic
-     :purpose "Per-message topic tags (Ollama backfill)."
-     :indexed  [:topic/guild-id :topic/channel-id :topic/message-id]
-     :topics   {:attr :topic/topic :cardinality :many}
-     :notes ["Use topics as padding to find related messages across the guild."]}
-    {:entity :repo
-     :purpose "Indexed repo files (repo-only)."
-     :fulltext [:repo/text]
-     :indexed  [:repo/path :repo/kind :repo/sha]
-     :notes ["Use repo search snippets for codebase questions; keep repo-only facts separate from chat claims."]}]
-   :query-back
-   {:tool :datalevin/fts
-    :shape "{:query/id \"q1\" :tool :datalevin/fts :query {:fts \"...\"} :expected {:limit 10} :purpose \"...\" :priority 1}"
-    :good-queries
-    ["Use concrete tokens (models/parts/usernames) and quoted phrases when possible."
-     "Start broad with 3–6 tokens, then narrow on a specific phrase that appears in evidence."]}})
-
-;; -----------------------------------------------------------------------------
-;; Vocabulary helpers for SLAP (optional)
-;; -----------------------------------------------------------------------------
-
-(defn top-extract-tags
-  "Return a vector of up to :limit common extract tags for a guild.
-  Output: [\"tag\" ...]"
-  ([guild-id] (top-extract-tags guild-id {}))
-  ([guild-id {:keys [limit] :or {limit 25}}]
-   (let [gid (some-> guild-id str)
-         dbv (db)]
-     (if-not (seq gid)
-       []
-       (->> (d/q '[:find ?t (count ?e)
-                  :in $ ?gid
-                  :where
-                  [?e :extract/guild-id ?gid]
-                  [?e :extract/tag ?t]]
-                dbv gid)
-            (sort-by second >)
-            (take (long limit))
-            (map first)
-            (map (fn [t] (-> (str t) str/lower-case str/trim)))
-            (remove str/blank?)
-            vec)))))
-
-(defn top-topic-tags
-  "Return a vector of up to :limit common topic tags for a guild.
-  Output: [\"topic\" ...]"
-  ([guild-id] (top-topic-tags guild-id {}))
-  ([guild-id {:keys [limit] :or {limit 25}}]
-   (let [gid (some-> guild-id str)
-         dbv (db)]
-     (if-not (seq gid)
-       []
-       (->> (d/q '[:find ?t (count ?e)
-                  :in $ ?gid
-                  :where
-                  [?e :topic/guild-id ?gid]
-                  [?e :topic/topic ?t]]
-                dbv gid)
-            (sort-by second >)
-            (take (long limit))
-            (map first)
-            (map (fn [t] (-> (str t) str/lower-case str/trim)))
-            (remove str/blank?)
-            vec)))))
-
-;; -----------------------------------------------------------------------------
-;; REPO helpers (no dependency on pigeonbot.repo)
-;; -----------------------------------------------------------------------------
-
-(defn- repo-eid-by-path
-  "Return eid for a repo file by path, or nil."
-  [dbv path]
-  (ffirst (d/q '[:find ?e :in $ ?p :where [?e :repo/path ?p]]
-               dbv (str path))))
-
-(defn- repo-sha-by-path
-  "Return sha for a repo file by path, or nil."
-  [dbv path]
-  (ffirst (d/q '[:find ?sha :in $ ?p :where [?e :repo/path ?p] [?e :repo/sha ?sha]]
-               dbv (str path))))
-
-(defn pull-repo-file
-  "Pull basic repo file fields by eid."
-  [dbv eid]
-  (try
-    (d/pull dbv
-            [:repo/path :repo/sha :repo/ts :repo/bytes :repo/kind :repo/text]
-            eid)
-    (catch Throwable _ nil)))
-
-(defn repo-all
-  "Return vector of repo file maps {:repo/path :repo/text :repo/sha :repo/kind :repo/bytes}."
-  []
-  (let [dbv (db)]
-    (->> (d/q '[:find ?e :where [?e :repo/path]] dbv)
-         (map first)
-         (map (fn [eid] (pull-repo-file dbv eid)))
-         (remove nil?)
-         vec)))
-
-(defn repo-search
-  "Repo-only search by scanning repo texts with token scoring.
-
-  Returns vector of:
-    {:path \"src/...\" :sha \"...\" :kind :clj :bytes N :snippet \"...\" :score K :matched [..]}
-
-  Options:
-  - :limit (default 6)
-  - :snippet-chars (default 900)
-  - :min-score (default 1)"
-  ([query] (repo-search query {}))
-  ([query {:keys [limit snippet-chars min-score]
-           :or {limit 6 snippet-chars 900 min-score 1}}]
-   (let [q (-> (or query "") str str/trim)]
-     (if (str/blank? q)
-       []
-       (let [tokens (->> (re-seq #"[a-z0-9\-_]{2,}" (str/lower-case q))
-                         (map #(str/replace % #"^_+|_+$" ""))
-                         (remove str/blank?)
-                         distinct
-                         vec)
-             files (repo-all)]
-         (->> files
-              (map (fn [{:repo/keys [path sha kind text bytes]}]
-                     (let [hay (str/lower-case (or text ""))
-                           matched (->> tokens
-                                        (filter #(not= -1 (.indexOf ^String hay ^String %)))
-                                        vec)
-                           score (count matched)]
-                       (when (>= score (long min-score))
-                         (let [tok (first matched)
-                               idx (.indexOf ^String hay ^String tok)
-                               start (max 0 (- idx (quot snippet-chars 4)))
-                               end   (min (count (or text "")) (+ start snippet-chars))
-                               snippet (subs (or text "") start end)]
-                           {:path path
-                            :sha sha
-                            :kind kind
-                            :bytes bytes
-                            :snippet snippet
-                            :score score
-                            :matched matched})))))
-              (remove nil?)
-              (sort-by (fn [m] [(- (:score m))
-                                (long (or (:bytes m) Long/MAX_VALUE))
-                                (:path m)]))
-              (take limit)
-              vec))))))
-
-(defn upsert-repo-file!
-  "Upsert a repo file entity by :repo/path.
-  Returns true if inserted/updated, false if unchanged (sha match)."
-  [{:keys [repo/path repo/text repo/sha repo/bytes repo/kind] :as m}]
-  (let [conn (ensure-conn!)
-        dbv  (d/db conn)
-        path (some-> (:repo/path m) str)
-        text (some-> (:repo/text m) str)
-        sha  (some-> (:repo/sha m) str)]
-    (when (and (seq path) (seq text) (seq sha))
-      (let [old (repo-sha-by-path dbv path)]
-        (if (= old sha)
-          false
-          (let [eid (or (repo-eid-by-path dbv path) (d/tempid :db.part/user))
-                ent (drop-nils
-                     {:db/id      eid
-                      :repo/path  path
-                      :repo/sha   sha
-                      :repo/ts    (now-date)
-                      :repo/bytes (long (or (:repo/bytes m) (count text)))
-                      :repo/kind  (or (:repo/kind m) :txt)
-                      :repo/text  text})]
-            (d/transact! conn [ent])
-            true))))))
-
-;; -----------------------------------------------------------------------------
-;; SPINE writes
-;; -----------------------------------------------------------------------------
-
-(defn message->tx [{:keys [id timestamp guild-id channel-id channel-type content] :as msg}]
+(defn upsert-message! [{:keys [id timestamp guild-id channel-id channel-type content] :as msg}]
+  (ensure-conn!)
   (let [{:keys [author-name author-id bot?]} (normalize-author msg)
         mid (some-> id str)
-        ts  (or (parse-discord-ts->date (str timestamp)) (now-date))
-        content (-> (or content "") (str/replace #"\u0000" "") str/trim)]
+        txt (clean-content content)]
     (when (seq mid)
-      (drop-nils
-       {:db/id                (d/tempid :db.part/user)
-        :message/id           mid
-        :message/ts           ts
-        :message/guild-id     (some-> guild-id str)
-        :message/channel-id   (some-> channel-id str)
-        :message/channel-type (when channel-type (long channel-type))
-        :message/author-id    (or author-id "")
-        :message/author-name  author-name
-        :message/bot?         bot?
-        :message/content      content}))))
-
-(defn upsert-message! [msg]
-  (when-let [tx (message->tx msg)]
-    (d/transact! (ensure-conn!) [tx])
-    true))
-
-;; -----------------------------------------------------------------------------
-;; META writes
-;; -----------------------------------------------------------------------------
+      (exec! "INSERT INTO messages
+              (message_id, ts, guild_id, channel_id, channel_type, author_id, author_name, bot, content)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(message_id) DO UPDATE SET
+                ts=excluded.ts,
+                guild_id=excluded.guild_id,
+                channel_id=excluded.channel_id,
+                channel_type=excluded.channel_type,
+                author_id=excluded.author_id,
+                author_name=excluded.author_name,
+                bot=excluded.bot,
+                content=excluded.content"
+             mid (date->iso timestamp) (some-> guild-id str) (some-> channel-id str)
+             (when channel-type (long channel-type))
+             (or author-id "") author-name bot? txt)
+      (exec! "DELETE FROM message_fts WHERE message_id = ?" mid)
+      (exec! "INSERT INTO message_fts(message_id, content) VALUES (?, ?)" mid txt)
+      (maybe-backup!)
+      true)))
 
 (defn- message-reference-id [msg]
   (or (get-in msg [:message_reference :message_id])
@@ -429,215 +281,456 @@
 (defn- looks-like-link? [content]
   (boolean (re-find #"https?://\S+" (or content ""))))
 
+(defn- word-count [s]
+  (let [s (-> (or s "") (str/replace #"\s+" " ") str/trim)]
+    (if (str/blank? s) 0 (count (str/split s #" ")))))
+
 (defn- mention-ids [msg]
   (->> (or (:mentions msg) [])
-       (map (fn [m] (some-> (:id m) str)))
-       (remove str/blank?)
+       (keep (fn [m] (some-> (:id m) str)))
        distinct
        vec))
 
 (defn- attachment-urls [msg]
   (->> (or (:attachments msg) [])
-       (map (fn [a] (or (:url a) (:proxy_url a) (:proxy-url a))))
-       (map (fn [u] (some-> u str str/trim)))
-       (remove str/blank?)
+       (keep (fn [a] (some-> (or (:url a) (:proxy_url a) (:proxy-url a)) str str/trim not-empty)))
        distinct
        vec))
 
-(defn- word-count [s]
-  (let [s (-> (or s "") (str/replace #"\s+" " ") str/trim)]
-    (if (str/blank? s) 0 (count (str/split s #" ")))))
-
-(defn message-meta->tx [{:keys [id timestamp guild-id channel-id content] :as msg}]
+(defn upsert-message-meta! [{:keys [id timestamp guild-id channel-id content] :as msg}]
+  (ensure-conn!)
   (let [{:keys [author-id bot?]} (normalize-author msg)
         mid (some-> id str)
-        ts  (or (parse-discord-ts->date (str timestamp)) (now-date))
-        content (str (or content ""))
-        m-ids (mention-ids msg)
-        a-urls (attachment-urls msg)]
+        content (str (or content ""))]
     (when (seq mid)
-      (drop-nils
-       (cond-> {:db/id                 (d/tempid :db.part/user)
-                :meta/message-id       mid
-                :meta/ts               ts
-                :meta/guild-id         (some-> guild-id str)
-                :meta/channel-id       (some-> channel-id str)
-                :meta/author-id        (or author-id "")
-                :meta/bot?             bot?
-                :meta/is-command?      (looks-like-command? content)
-                :meta/has-attachments? (boolean (seq a-urls))
-                :meta/has-links?       (looks-like-link? content)
-                :meta/reply-to-id      (some-> (message-reference-id msg) str)
-                :meta/char-count       (long (count content))
-                :meta/word-count       (long (word-count content))}
-         (seq m-ids) (assoc :meta/mention-ids m-ids)
-         (seq a-urls) (assoc :meta/attachment-urls a-urls))))))
+      (exec! "INSERT INTO message_meta
+              (message_id, ts, guild_id, channel_id, author_id, bot, is_command, has_attachments,
+               has_links, reply_to_id, char_count, word_count)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(message_id) DO UPDATE SET
+                ts=excluded.ts,
+                guild_id=excluded.guild_id,
+                channel_id=excluded.channel_id,
+                author_id=excluded.author_id,
+                bot=excluded.bot,
+                is_command=excluded.is_command,
+                has_attachments=excluded.has_attachments,
+                has_links=excluded.has_links,
+                reply_to_id=excluded.reply_to_id,
+                char_count=excluded.char_count,
+                word_count=excluded.word_count"
+             mid (date->iso timestamp) (some-> guild-id str) (some-> channel-id str)
+             (or author-id "") bot? (looks-like-command? content)
+             (boolean (seq (attachment-urls msg))) (looks-like-link? content)
+             (some-> (message-reference-id msg) str)
+             (count content) (word-count content))
+      (exec! "DELETE FROM meta_mentions WHERE message_id = ?" mid)
+      (doseq [x (mention-ids msg)]
+        (exec! "INSERT OR IGNORE INTO meta_mentions(message_id, mention_id) VALUES (?, ?)" mid x))
+      (exec! "DELETE FROM meta_attachments WHERE message_id = ?" mid)
+      (doseq [x (attachment-urls msg)]
+        (exec! "INSERT OR IGNORE INTO meta_attachments(message_id, url) VALUES (?, ?)" mid x))
+      true)))
 
-(defn upsert-message-meta! [msg]
-  (when-let [tx (message-meta->tx msg)]
-    (d/transact! (ensure-conn!) [tx])
-    true))
+(defn count-messages []
+  (ensure-conn!)
+  (or (scalar "SELECT COUNT(*) FROM messages") 0))
 
-;; -----------------------------------------------------------------------------
-;; EXTRACT writes (dedup + correct tag storage)
-;; -----------------------------------------------------------------------------
+(defn message-count-by-channel [channel-id]
+  (ensure-conn!)
+  (or (scalar "SELECT COUNT(*) FROM messages WHERE channel_id = ?" (str channel-id)) 0))
+
+(defn topic-count-by-channel [channel-id]
+  (ensure-conn!)
+  (or (scalar "SELECT COUNT(*) FROM topics WHERE channel_id = ?" (str channel-id)) 0))
+
+(defn extract-count-by-channel [channel-id]
+  (ensure-conn!)
+  (or (scalar "SELECT COUNT(*) FROM extracts WHERE channel_id = ?" (str channel-id)) 0))
+
+(defn guild-channel-ids [guild-id]
+  (ensure-conn!)
+  (->> (query! "SELECT DISTINCT channel_id FROM messages WHERE guild_id = ? ORDER BY channel_id"
+               (str guild-id))
+       (map :channel_id)
+       vec))
+
+(defn message-rows-in-channel [channel-id]
+  (ensure-conn!)
+  (->> (query! "SELECT message_id, content, guild_id, channel_id
+                FROM messages
+                WHERE channel_id = ?
+                ORDER BY ts ASC, message_id ASC"
+               (str channel-id))
+       (map (fn [m] [(:message_id m) (:content m) (:guild_id m) (:channel_id m)]))
+       vec))
+
+(defn channel-transcript-rows [channel-id]
+  (ensure-conn!)
+  (->> (query! "SELECT ts, author_name, content, message_id
+                FROM messages
+                WHERE channel_id = ?
+                ORDER BY ts ASC, message_id ASC"
+               (str channel-id))
+       (map (fn [m] [(:ts m) (:author_name m) (:content m) (:message_id m)]))
+       vec))
+
+(defn recent-messages
+  ([channel-id] (recent-messages channel-id 12))
+  ([channel-id limit]
+   (ensure-conn!)
+   (->> (query! "SELECT message_id, ts, author_name, content, channel_id
+                 FROM messages
+                 WHERE channel_id = ?
+                 ORDER BY ts DESC, message_id DESC
+                 LIMIT ?"
+                (str channel-id) (long limit))
+        reverse
+        (mapv (fn [m]
+                {:message/id (:message_id m)
+                 :ts (:ts m)
+                 :author/name (:author_name m)
+                 :content (:content m)
+                 :channel/id (:channel_id m)})))))
+
+(defn pull-message-by-id [message-id]
+  (ensure-conn!)
+  (when-let [m (first (query! "SELECT * FROM messages WHERE message_id = ?" (str message-id)))]
+    {:message/id (:message_id m)
+     :message/ts (:ts m)
+     :message/guild-id (:guild_id m)
+     :message/channel-id (:channel_id m)
+     :message/channel-type (:channel_type m)
+     :message/author-id (:author_id m)
+     :message/author-name (:author_name m)
+     :message/bot? (int->bool (:bot m))
+     :message/content (:content m)}))
+
+(defn- like-search-messages [q {:keys [guild-id channel-id limit]}]
+  (let [terms (->> (re-seq #"[A-Za-z0-9_\-]{2,}" (str q))
+                   (map str/lower-case)
+                   distinct
+                   (take 6)
+                   vec)
+        clauses (concat
+                 ["1=1"]
+                 (when (seq guild-id) ["guild_id = ?"])
+                 (when (seq channel-id) ["channel_id = ?"])
+                 (for [_ terms] "lower(content) LIKE ?"))
+        params (concat
+                (when (seq guild-id) [(str guild-id)])
+                (when (seq channel-id) [(str channel-id)])
+                (for [t terms] (str "%" t "%"))
+                [(long (or limit 10))])]
+    (apply query!
+           (str "SELECT * FROM messages WHERE "
+                (str/join " AND " clauses)
+                " ORDER BY ts DESC LIMIT ?")
+           params)))
+
+(defn search-messages
+  ([q] (search-messages q {}))
+  ([q {:keys [guild-id channel-id limit] :or {limit 10} :as opts}]
+   (ensure-conn!)
+   (let [q (str q)]
+     (try
+       (let [clauses (concat
+                      ["message_fts MATCH ?"]
+                      (when (seq guild-id) ["m.guild_id = ?"])
+                      (when (seq channel-id) ["m.channel_id = ?"]))
+             params (concat
+                     [q]
+                     (when (seq guild-id) [(str guild-id)])
+                     (when (seq channel-id) [(str channel-id)])
+                     [(long limit)])]
+         (->> (apply query!
+                     (str "SELECT m.*
+                           FROM message_fts f
+                           JOIN messages m ON m.message_id = f.message_id
+                           WHERE " (str/join " AND " clauses) "
+                           ORDER BY bm25(f)
+                           LIMIT ?")
+                     params)
+              (mapv (fn [m]
+                      {:message/id (:message_id m)
+                       :message/ts (:ts m)
+                       :message/guild-id (:guild_id m)
+                       :message/channel-id (:channel_id m)
+                       :message/author-id (:author_id m)
+                       :message/author-name (:author_name m)
+                       :message/bot? (int->bool (:bot m))
+                       :message/content (:content m)}))))
+       (catch Throwable _
+         (->> (like-search-messages q opts)
+              (mapv (fn [m]
+                      {:message/id (:message_id m)
+                       :message/ts (:ts m)
+                       :message/guild-id (:guild_id m)
+                       :message/channel-id (:channel_id m)
+                       :message/author-id (:author_id m)
+                       :message/author-name (:author_name m)
+                       :message/bot? (int->bool (:bot m))
+                       :message/content (:content m)}))))))))
+
+(defn fulltext
+  "Legacy-ish helper. Prefer search-messages."
+  ([query] (fulltext query {}))
+  ([query opts]
+   (->> (search-messages query opts)
+        (mapv (fn [m] [(:message/id m) :message/content (:message/content m)])))))
 
 (defn- normalize-tags [xs]
   (->> (or xs [])
-       (map (fn [t] (-> (str t) str/lower-case str/trim)))
+       (map #(-> (str %) str/lower-case str/trim))
        (remove str/blank?)
        distinct
        vec))
-
-(defn- normalize-extract-text [s]
-  (-> (or s "")
-      (str/replace #"\s+" " ")
-      str/trim
-      str/lower-case))
 
 (defn- sha1-hex ^String [^String s]
   (let [md (java.security.MessageDigest/getInstance "SHA-1")
         bs (.digest md (.getBytes s "UTF-8"))]
-    (apply str (map (fn [^Byte b] (format "%02x" (bit-and 0xff b))) bs))))
+    (apply str (map #(format "%02x" (bit-and 0xff %)) bs))))
 
-(defn- extract-hash
-  "Stable dedupe key: guild + channel + kind + normalized text."
-  [{:keys [guild-id channel-id kind text]}]
-  (sha1-hex (str (or guild-id "") "|"
-                 (or channel-id "") "|"
-                 (name (or kind :note)) "|"
-                 (normalize-extract-text text))))
+(defn- normalize-extract-text [s]
+  (-> (or s "") (str/replace #"\s+" " ") str/trim str/lower-case))
 
-(defn- find-extract-eid-by-hash [dbv h]
-  (ffirst (d/q '[:find ?e :in $ ?h :where [?e :extract/hash ?h]]
-               dbv (str h))))
+(defn- extract-hash [{:keys [guild-id channel-id kind text]}]
+  (sha1-hex (str (or guild-id "") "|" (or channel-id "") "|"
+                 (name (or kind :note)) "|" (normalize-extract-text text))))
 
-(defn- existing-extract-tags [dbv eid]
-  (set (map first
-            (d/q '[:find ?t :in $ ?e :where [?e :extract/tag ?t]]
-                 dbv eid))))
-
-(defn extract-item->txdata
-  "Return tx-data for one extract:
-  - If new: entity map + :extract/tag datoms
-  - If dup: bump seen-count + last-seen, add missing tags"
-  [ctx item]
+(defn upsert-extracts! [ctx extracts]
+  (ensure-conn!)
   (let [{:keys [guild-id channel-id message-id packet-id model]} ctx
-        item-map (cond
-                   (string? item) {:text item :kind :note :confidence 0.75 :tags []}
-                   (map? item) item
-                   :else nil)]
-    (when item-map
-      (let [txt (some-> (or (:text item-map) (:content item-map)
-                            (:extract/text item-map) (:extract/content item-map))
-                        str str/trim)
-            kind (or (:kind item-map) (:extract/kind item-map) :note)
-            conf (double (or (:confidence item-map) (:extract/confidence item-map) 0.75))
-            scope (or (:scope item-map) (:extract/scope item-map) :channel)
-            tags (normalize-tags (or (:tags item-map) (:extract/tags item-map) []))]
+        now (now-iso)]
+    (doseq [item (or extracts [])]
+      (let [m (cond
+                (string? item) {:text item :kind :note :confidence 0.75 :tags []}
+                (map? item) item
+                :else nil)
+            txt (some-> (or (:text m) (:content m) (:extract/text m)) str str/trim)]
         (when (seq txt)
-          (let [gid (some-> guild-id str)
-                cid (some-> channel-id str)
-                h   (extract-hash {:guild-id gid :channel-id cid :kind kind :text txt})
-                conn (ensure-conn!)
-                dbv  (d/db conn)
-                existing (find-extract-eid-by-hash dbv h)
-                now (now-date)]
+          (let [kind (or (:kind m) (:extract/kind m) :note)
+                conf (double (or (:confidence m) (:extract/confidence m) 0.75))
+                scope (or (:scope m) (:extract/scope m) :channel)
+                tags (normalize-tags (or (:tags m) (:extract/tags m) []))
+                h (extract-hash {:guild-id guild-id :channel-id channel-id :kind kind :text txt})
+                existing (scalar "SELECT extract_id FROM extracts WHERE hash = ?" h)
+                eid (or existing (str (UUID/randomUUID)))]
             (if existing
-              (let [have (existing-extract-tags dbv existing)
-                    missing (remove have tags)
-                    ops (concat
-                         [[:db/add existing :extract/last-seen now]
-                          [:db/add existing :extract/seen-count 1]
-                          [:db/add existing :extract/message-id (some-> message-id str)]
-                          [:db/add existing :extract/packet-id (some-> packet-id str)]
-                          [:db/add existing :extract/model (or model "openai")]]
-                         (for [t missing] [:db/add existing :extract/tag t]))]
-                (vec ops))
+              (exec! "UPDATE extracts
+                      SET last_seen = ?, seen_count = seen_count + 1,
+                          message_id = ?, packet_id = ?, model = ?
+                      WHERE extract_id = ?"
+                     now (some-> message-id str) (some-> packet-id str) (or model "openai") eid)
+              (do
+                (exec! "INSERT INTO extracts
+                        (extract_id, hash, ts, last_seen, seen_count, text, kind, confidence, scope,
+                         guild_id, channel_id, message_id, packet_id, model)
+                        VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                       eid h now now txt (name kind) conf (name scope)
+                       (some-> guild-id str) (some-> channel-id str)
+                       (some-> message-id str) (some-> packet-id str) (or model "openai"))
+                (exec! "INSERT INTO extract_fts(extract_id, text) VALUES (?, ?)" eid txt)))
+            (doseq [t tags]
+              (exec! "INSERT OR IGNORE INTO extract_tags(extract_id, tag) VALUES (?, ?)" eid t))))))
+    (maybe-backup!)
+    true))
 
-              (let [eid (d/tempid :db.part/user)
-                    ent (drop-nils
-                         {:db/id             eid
-                          :extract/id         (str (java.util.UUID/randomUUID))
-                          :extract/hash       h
-                          :extract/ts         now
-                          :extract/last-seen  now
-                          :extract/seen-count 1
-                          :extract/text       txt
-                          :extract/kind       kind
-                          :extract/confidence conf
-                          :extract/scope      scope
-                          :extract/guild-id   gid
-                          :extract/channel-id cid
-                          :extract/message-id (some-> message-id str)
-                          :extract/packet-id  (some-> packet-id str)
-                          :extract/model      (or model "openai")})
-                    tag-ops (for [t tags] [:db/add eid :extract/tag t])]
-                (vec (concat [ent] tag-ops))))))))))
+(defn related-extracts-by-tags [guild-id tags {:keys [limit] :or {limit 20}}]
+  (ensure-conn!)
+  (if (or (not (seq (str guild-id))) (empty? tags))
+    []
+    (let [placeholders (str/join "," (repeat (count tags) "?"))
+          rows (apply query!
+                      (str "SELECT e.extract_id, e.ts, e.kind, e.confidence, e.channel_id, e.text,
+                                   COUNT(t.tag) AS overlap,
+                                   GROUP_CONCAT(t.tag) AS matched_tags
+                            FROM extracts e
+                            JOIN extract_tags t ON t.extract_id = e.extract_id
+                            WHERE e.guild_id = ?
+                              AND t.tag IN (" placeholders ")
+                            GROUP BY e.extract_id
+                            ORDER BY overlap DESC, e.ts DESC
+                            LIMIT ?")
+                      (concat [(str guild-id)] tags [(long limit)]))]
+      (mapv (fn [r]
+              {:extract/eid (:extract_id r)
+               :extract/ts (:ts r)
+               :extract/channel-id (:channel_id r)
+               :extract/text (:text r)
+               :extract/kind (keyword (or (:kind r) "note"))
+               :extract/confidence (double (or (:confidence r) 0.75))
+               :extract/matched-tags (-> (or (:matched_tags r) "")
+                                         (str/split #",")
+                                         vec)
+               :extract/overlap (long (or (:overlap r) 0))})
+            rows))))
 
-(defn upsert-extracts!
-  "Write a vector of extract items into the DB as separate entities.
-  De-dupes by :extract/hash; repeats bump seen-count + last-seen."
-  [ctx extracts]
-  (let [txdata (->> (or extracts [])
-                    (map (partial extract-item->txdata ctx))
-                    (remove nil?)
-                    (mapcat identity)
-                    vec)]
-    (when (seq txdata)
-      (d/transact! (ensure-conn!) txdata)
-      true)))
-
-;; -----------------------------------------------------------------------------
-;; TOPICS: per-message topic tags (separate from spine)
-;; -----------------------------------------------------------------------------
-
-(defn- normalize-topics [xs]
-  (->> (or xs [])
-       (map (fn [t] (-> (str t) str/lower-case str/trim)))
-       (remove str/blank?)
-       distinct
-       (take 12)
-       vec))
-
-(defn upsert-message-topics!
-  [{:keys [message-id guild-id channel-id model topics]}]
-  (let [conn (ensure-conn!)
-        dbv (d/db conn)
-        mid (some-> message-id str)
-        model (or model "ollama")
-        topics (normalize-topics topics)]
-    (when (and (seq mid) (seq topics))
-      (let [eid (or (ffirst (d/q '[:find ?e :in $ ?mid :where [?e :topic/message-id ?mid]]
-                                 dbv mid))
-                    (d/tempid :db.part/user))
-            ent (drop-nils {:db/id            eid
-                            :topic/message-id mid
-                            :topic/ts         (now-date)
-                            :topic/guild-id   (some-> guild-id str)
-                            :topic/channel-id (some-> channel-id str)
-                            :topic/model      (str model)})
-            ops (for [t topics] [:db/add eid :topic/topic t])]
-        (d/transact! conn (vec (concat [ent] ops)))
-        true))))
+(defn messages-by-topics [guild-id topics {:keys [limit] :or {limit 20}}]
+  (ensure-conn!)
+  (if (or (not (seq (str guild-id))) (empty? topics))
+    []
+    (let [placeholders (str/join "," (repeat (count topics) "?"))
+          rows (apply query!
+                      (str "SELECT m.ts, m.author_name, m.content, m.channel_id, m.message_id
+                            FROM messages m
+                            JOIN topic_tags tt ON tt.message_id = m.message_id
+                            WHERE m.guild_id = ?
+                              AND tt.topic IN (" placeholders ")
+                            GROUP BY m.message_id
+                            ORDER BY m.ts DESC
+                            LIMIT ?")
+                      (concat [(str guild-id)] topics [(long limit)]))]
+      (->> rows
+           reverse
+           (mapv (fn [r]
+                   {:message/ts (:ts r)
+                    :message/author-name (:author_name r)
+                    :message/content (:content r)
+                    :message/channel-id (:channel_id r)
+                    :message/id (:message_id r)}))))))
 
 (defn topic-exists? [mid]
-  (let [dbv (db)]
-    (boolean (ffirst (d/q '[:find ?e :in $ ?mid :where [?e :topic/message-id ?mid]]
-                          dbv (str mid))))))
+  (ensure-conn!)
+  (boolean (scalar "SELECT message_id FROM topics WHERE message_id = ?" (str mid))))
 
-;; -----------------------------------------------------------------------------
-;; Queries / helpers
-;; -----------------------------------------------------------------------------
+(defn upsert-message-topics! [{:keys [message-id guild-id channel-id model topics]}]
+  (ensure-conn!)
+  (let [mid (some-> message-id str)
+        topics (->> topics
+                    (map #(-> (str %) str/lower-case str/trim))
+                    (remove str/blank?)
+                    distinct
+                    (take 12)
+                    vec)]
+    (when (and (seq mid) (seq topics))
+      (exec! "INSERT INTO topics(message_id, ts, guild_id, channel_id, model)
+              VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(message_id) DO UPDATE SET
+                ts=excluded.ts,
+                guild_id=excluded.guild_id,
+                channel_id=excluded.channel_id,
+                model=excluded.model"
+             mid (now-iso) (some-> guild-id str) (some-> channel-id str) (or model "ollama"))
+      (doseq [t topics]
+        (exec! "INSERT OR IGNORE INTO topic_tags(message_id, topic) VALUES (?, ?)" mid t))
+      (maybe-backup!)
+      true)))
 
-(defn count-messages []
-  (let [dbv (db)]
-    (ffirst (d/q '[:find (count ?e) :where [?e :message/id]] dbv))))
+(defn top-extract-tags
+  ([guild-id] (top-extract-tags guild-id {}))
+  ([guild-id {:keys [limit] :or {limit 25}}]
+   (ensure-conn!)
+   (->> (query! "SELECT t.tag, COUNT(*) AS n
+                 FROM extract_tags t
+                 JOIN extracts e ON e.extract_id = t.extract_id
+                 WHERE e.guild_id = ?
+                 GROUP BY t.tag
+                 ORDER BY n DESC
+                 LIMIT ?"
+                (str guild-id) (long limit))
+        (mapv :tag))))
 
-(defn fulltext
-  ([query] (fulltext query {}))
-  ([query opts]
-   (d/q '[:find ?e ?a ?v
-          :in $ ?q ?opts
-          :where [(fulltext $ ?q ?opts) [[?e ?a ?v]]]]
-        (db) query opts)))
+(defn top-topic-tags
+  ([guild-id] (top-topic-tags guild-id {}))
+  ([guild-id {:keys [limit] :or {limit 25}}]
+   (ensure-conn!)
+   (->> (query! "SELECT tt.topic, COUNT(*) AS n
+                 FROM topic_tags tt
+                 JOIN topics t ON t.message_id = tt.message_id
+                 WHERE t.guild_id = ?
+                 GROUP BY tt.topic
+                 ORDER BY n DESC
+                 LIMIT ?"
+                (str guild-id) (long limit))
+        (mapv :topic))))
+
+(defn repo-all []
+  (ensure-conn!)
+  (mapv (fn [r]
+          {:repo/path (:path r)
+           :repo/sha (:sha r)
+           :repo/ts (:ts r)
+           :repo/bytes (:bytes r)
+           :repo/kind (keyword (or (:kind r) "txt"))
+           :repo/text (:text r)})
+        (query! "SELECT * FROM repo_files ORDER BY path")))
+
+(defn upsert-repo-file! [{:keys [repo/path repo/text repo/sha repo/bytes repo/kind] :as m}]
+  (ensure-conn!)
+  (let [path (some-> (:repo/path m) str)
+        text (some-> (:repo/text m) str)
+        sha (some-> (:repo/sha m) str)
+        old (when path (scalar "SELECT sha FROM repo_files WHERE path = ?" path))]
+    (when (and (seq path) (seq text) (seq sha))
+      (if (= old sha)
+        false
+        (do
+          (exec! "INSERT INTO repo_files(path, sha, ts, bytes, kind, text)
+                  VALUES (?, ?, ?, ?, ?, ?)
+                  ON CONFLICT(path) DO UPDATE SET
+                    sha=excluded.sha,
+                    ts=excluded.ts,
+                    bytes=excluded.bytes,
+                    kind=excluded.kind,
+                    text=excluded.text"
+                 path sha (now-iso) (long (or (:repo/bytes m) (count text)))
+                 (name (or (:repo/kind m) :txt)) text)
+          (exec! "DELETE FROM repo_fts WHERE path = ?" path)
+          (exec! "INSERT INTO repo_fts(path, text) VALUES (?, ?)" path text)
+          (maybe-backup!)
+          true)))))
+
+(defn repo-search
+  ([query] (repo-search query {}))
+  ([query {:keys [limit snippet-chars min-score]
+           :or {limit 6 snippet-chars 900 min-score 1}}]
+   (let [q (-> (or query "") str str/trim)]
+     (if (str/blank? q)
+       []
+       (let [tokens (->> (re-seq #"[a-z0-9\-_]{2,}" (str/lower-case q))
+                         distinct
+                         vec)]
+         (->> (repo-all)
+              (map (fn [{:repo/keys [path sha kind text bytes]}]
+                     (let [hay (str/lower-case (or text ""))
+                           matched (->> tokens
+                                        (filter #(not= -1 (.indexOf ^String hay ^String %)))
+                                        vec)
+                           score (count matched)]
+                       (when (>= score (long min-score))
+                         (let [tok (first matched)
+                               idx (max 0 (.indexOf ^String hay ^String tok))
+                               start (max 0 (- idx (quot snippet-chars 4)))
+                               end (min (count (or text "")) (+ start snippet-chars))]
+                           {:path path
+                            :sha sha
+                            :kind kind
+                            :bytes bytes
+                            :snippet (subs (or text "") start end)
+                            :score score
+                            :matched matched})))))
+              (remove nil?)
+              (sort-by (fn [m] [(- (:score m)) (:path m)]))
+              (take limit)
+              vec))))))
+
+(defn slap-capabilities [{:keys [guild-id channel-id]}]
+  {:scope {:guild/id (some-> guild-id str)
+           :channel/id (some-> channel-id str)}
+   :storage :sqlite
+   :entities
+   [{:entity :message
+     :fulltext [:message/content]
+     :notes ["SQLite FTS5 over raw Discord messages."]}
+    {:entity :extract
+     :fulltext [:extract/text]
+     :tags {:attr :extract/tag :cardinality :many}}
+    {:entity :topic
+     :topics {:attr :topic/topic :cardinality :many}}
+    {:entity :repo
+     :fulltext [:repo/text]}]
+   :query-back
+   {:tool :sqlite/fts
+    :compat-tool :datalevin/fts
+    :notes ["Legacy :datalevin/fts query-back is accepted but now backed by SQLite."]}})
