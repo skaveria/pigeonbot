@@ -183,13 +183,54 @@
              ""
              "Style reminder: playful, sassy pigeon entity; avoid generic assistant tone."]))))
 
-(defn- safe-edn-read [s]
+(defn- strip-codefences [s]
+  (-> (str (or s ""))
+      (str/replace #"(?s)^\s*```[a-zA-Z0-9_-]*\s*" "")
+      (str/replace #"(?s)\s*```\s*$" "")
+      str/trim))
+
+(defn- try-edn-read [s]
   (try
     (edn/read-string {:readers {} :default (fn [_tag v] v)} s)
-    (catch Throwable t
-      (throw (ex-info "SLAP: model returned non-EDN"
-                      {:raw (subs (str s) 0 (min 600 (count (str s))))}
-                      t)))))
+    (catch Throwable _ nil)))
+
+(defn- extract-edn-map-snippet [s]
+  (let [s (str (or s ""))]
+    (loop [i 0
+           start nil
+           depth 0
+           best nil]
+      (if (>= i (count s))
+        best
+        (let [ch (.charAt ^String s i)]
+          (cond
+            (= ch \{)
+            (recur (inc i)
+                   (or start i)
+                   (inc depth)
+                   best)
+
+            (= ch \})
+            (let [depth' (dec depth)]
+              (if (and start (zero? depth'))
+                (let [snippet (subs s start (inc i))]
+                  (recur (inc i) nil 0 snippet))
+                (recur (inc i) start depth' best)))
+
+            :else
+            (recur (inc i) start depth best)))))))
+
+(defn- safe-edn-read [s]
+  (let [raw (str (or s ""))
+        stripped (strip-codefences raw)]
+    (or
+     (try-edn-read stripped)
+     (when-let [snippet (extract-edn-map-snippet stripped)]
+       (try-edn-read snippet))
+     (throw
+      (ex-info "SLAP: model returned non-EDN"
+               {:raw (subs raw 0 (min 1200 (count raw)))
+                :hint "Model did not return a readable EDN map, even after stripping fences/prose."})))))
 
 (defn- validate-response!
   [resp packet-id]

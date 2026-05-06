@@ -8,8 +8,8 @@
   (let [m (config/load-config)]
     {:base-url (or (:openai-base-url m) "https://api.openai.com")
      :api-key  (or (:openai-api-key m) (System/getenv "OPENAI_API_KEY"))
-     :model    (or (:openai-model m) "gpt-4.1-mini")
-     :timeout  (long (or (:brain-timeout-ms m) 60000))
+     :model    (or (:openai-model m) "gpt-5.5")
+     :timeout  (long (or (:brain-timeout-ms m) 300000))
      :temperature (:openai-temperature m)
      :max-output-tokens (:openai-max-output-tokens m)
      ;; This is the main persona hook for non-SLAP calls.
