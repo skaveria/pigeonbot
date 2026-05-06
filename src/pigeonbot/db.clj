@@ -10,7 +10,7 @@
 ;; -----------------------------------------------------------------------------
 ;; SQLite config
 ;; -----------------------------------------------------------------------------
-(declare ensure-conn!)
+
 (def ^:private db-path "./data/pigeonbot.sqlite3")
 (def ^:private backup-dir "./data/backups")
 (def ^:private backup-every-ms (* 6 60 60 1000)) ;; 6 hours
@@ -804,6 +804,12 @@
             :message/author-name (.getString rs "author_name")
             :message/content (.getString rs "content")
             :message/channel-id (.getString rs "channel_id")}))))))
+
+(defn recent-messages
+  "Compatibility alias for older SLAP code.
+  Returns newest-first message maps for a channel."
+  [channel-id limit]
+  (recent-channel-messages channel-id limit))
 
 (defn slap-capabilities
   [{:keys [guild-id channel-id]}]
