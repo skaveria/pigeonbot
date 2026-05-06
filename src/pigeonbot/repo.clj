@@ -2,92 +2,99 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [pigeonbot.db :as db])
-  (:import (java.security MessageDigest)
-           (java.nio.charset StandardCharsets)))
+  (:import (java.nio.charset StandardCharsets)
+           (java.security MessageDigest)))
 
 (def ^:private max-bytes
-  "Hard cap per file indexed into DB (avoid huge bundles)."
-  (* 300 1024)) ;; 300KB
+  (* 300 1024))
 
 (def ^:private include-exts
   #{".clj" ".cljs" ".cljc" ".edn" ".md" ".org" ".txt"})
 
 (def ^:private exclude-path-substrings
-  ["/.git/" "/target/" "/node_modules/" "/data/" "/.cpcache/" "/.shadow-cljs/"
-   "/.idea/" "/.vscode/"])
+  ["/.git/"
+   "/target/"
+   "/node_modules/"
+   "/data/"
+   "/.cpcache/"
+   "/.shadow-cljs/"
+   "/.idea/"
+   "/.vscode/"])
 
 (def ^:private exclude-filenames
-  #{"config.edn" ".env" ".env.local" ".envrc" ".nrepl-port"})
+  #{"config.edn"
+    ".env"
+    ".env.local"
+    ".envrc"
+    ".nrepl-port"})
 
 (defn- sha1-hex ^String [^String s]
   (let [md (MessageDigest/getInstance "SHA-1")
         bs (.digest md (.getBytes s StandardCharsets/UTF_8))]
-    (apply str (map (fn [^Byte b] (format "%02x" (bit-and 0xff b))) bs))))
+    (apply str
+           (map (fn [^Byte b]
+                  (format "%02x" (bit-and 0xff b)))
+                bs))))
 
 (defn- repo-root []
-  ;; Repo-only: assume current working dir is repo root when you run this.
   (.getCanonicalFile (io/file ".")))
 
 (defn- relpath [^java.io.File root ^java.io.File f]
-  (let [rp (.toPath root)
-        fp (.toPath f)]
-    (str (.toString (.relativize rp fp)))))
+  (str (.toString (.relativize (.toPath root) (.toPath f)))))
 
-(defn- file-ext
-  "Return lowercase extension including dot (e.g. \".clj\"), or nil."
-  [^java.io.File f]
+(defn- file-ext [^java.io.File f]
   (let [name (.getName f)
         i (.lastIndexOf ^String name ".")]
-    (when (and (>= i 0) (< i (dec (.length ^String name))))
+    (when (and (>= i 0)
+               (< i (dec (.length ^String name))))
       (-> (subs name i) str/lower-case))))
 
-(defn- included-file?
-  "Decide whether a file should be indexed (repo-only)."
-  [^java.io.File root ^java.io.File f]
+(defn- included-file? [^java.io.File root ^java.io.File f]
   (let [rp (str "/" (relpath root f))
         name (.getName f)
         ext (file-ext f)]
     (and (.isFile f)
-         (some? ext)
+         ext
          (contains? include-exts ext)
          (not (contains? exclude-filenames name))
          (not (some #(str/includes? rp %) exclude-path-substrings)))))
 
-(defn- looks-binary?
-  "Heuristic: treat NUL byte as binary."
-  [^String s]
+(defn- looks-binary? [^String s]
   (boolean (re-find #"\u0000" s)))
 
-(defn- file->text
-  "Read file as UTF-8 string if not too large."
-  [^java.io.File f]
+(defn- file->text [^java.io.File f]
   (let [len (.length f)]
     (cond
       (> len (long max-bytes))
-      {:ok? false :reason :too-large :bytes len}
+      {:ok? false
+       :reason :too-large
+       :bytes len}
 
       :else
       (try
         (let [s (slurp f :encoding "UTF-8")]
           (if (looks-binary? s)
-            {:ok? false :reason :binary}
-            {:ok? true :text s :bytes len}))
+            {:ok? false
+             :reason :binary
+             :bytes len}
+            {:ok? true
+             :text s
+             :bytes len}))
         (catch Throwable t
-          {:ok? false :reason :read-failed :error (.getMessage t)})))))
+          {:ok? false
+           :reason :read-failed
+           :error (.getMessage t)
+           :bytes len})))))
 
 (defn index-repo!
-  "Index repo files into Datalevin under :repo/*.
+  "Index repo files into the local SQLite-backed memory DB.
 
-  Repo-only by design:
-  - reads only from current repo directory
-  - excludes config.edn and common junk dirs
-
-  Returns summary:
+  Returns:
     {:root \"...\"
-     :seen N
-     :indexed N
-     :skipped N
-     :errors [{:path ... :reason ...}]}"
+     :seen n
+     :indexed n
+     :skipped n
+     :errors [...]}"
   ([] (index-repo! {}))
   ([{:keys [verbose?]}]
    (db/ensure-conn!)
@@ -106,7 +113,11 @@
            (not ok?)
            (do
              (swap! skipped inc)
-             (swap! errors conj {:path rp :reason reason :error error :bytes bytes})
+             (swap! errors conj
+                    {:path rp
+                     :reason reason
+                     :error error
+                     :bytes bytes})
              (when verbose?
                (println "repo/index skip" rp reason (or error ""))))
 

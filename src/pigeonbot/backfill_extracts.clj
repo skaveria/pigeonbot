@@ -3,22 +3,16 @@
             [clojure.string :as str]
             [org.httpkit.client :as http]
             [cheshire.core :as json]
-            [datalevin.core :as dlv]
             [pigeonbot.config :as config]
             [pigeonbot.db :as db]))
-
-;; -----------------------------------------------------------------------------
-;; OpenAI (Responses API)
-;; -----------------------------------------------------------------------------
 
 (defn- openai-cfg []
   (let [m (config/load-config)]
     {:base-url (or (:openai-base-url m) "https://api.openai.com")
      :api-key  (or (:openai-api-key m) (System/getenv "OPENAI_API_KEY"))
-     :model    (or (:openai-model m) "gpt-4.1-mini")
-     :timeout  (long (or (:brain-timeout-ms m) 60000))
-     :max-output-tokens (or (:openai-max-output-tokens m) 900)
-     :temperature (if (number? (:openai-temperature m)) (:openai-temperature m) 0)}))
+     :model    (or (:openai-model m) "gpt-5.5")
+     :timeout  (long (or (:brain-timeout-ms m) 120000))
+     :max-output-tokens (long (or (:openai-max-output-tokens m) 1200))}))
 
 (defn- endpoint [base path]
   (str (str/replace (or base "") #"/+$" "") path))
@@ -30,223 +24,266 @@
     (string? body) (try (json/decode body true) (catch Throwable _ {}))
     :else {}))
 
-(defn- extract-output-text
-  "Extract assistant text from OpenAI Responses API result."
-  [resp-body]
+(defn- extract-output-text [resp-body]
   (let [m (decode-body resp-body)]
     (or
-      ;; common convenience field
-      (when (string? (:output_text m)) (:output_text m))
+     (:output_text m)
+     (let [out (or (:output m) [])
+           texts (->> out
+                      (mapcat
+                       (fn [item]
+                         (let [content (:content item)]
+                           (cond
+                             (sequential? content)
+                             (keep #(or (:text %) (:output_text %)) content)
 
-      ;; general output traversal
-      (let [out (or (:output m) [])
-            texts (->> out
-                       (mapcat (fn [item]
-                                 (let [content (:content item)]
-                                   (cond
-                                     (sequential? content)
-                                     (->> content
-                                          (keep (fn [c]
-                                                  (cond
-                                                    (string? (:text c)) (:text c)
-                                                    (string? (:output_text c)) (:output_text c)
-                                                    :else nil))))
-                                     (string? content) [content]
-                                     :else []))))
-                       (map str)
-                       (remove str/blank?)
-                       vec)]
-        (when (seq texts) (str/join "" texts)))
+                             (string? content)
+                             [content]
 
-      ;; error message fallback
-      (get-in m [:error :message])
+                             :else
+                             []))))
+                      (map str)
+                      (remove str/blank?)
+                      vec)]
+       (when (seq texts)
+         (str/join "" texts)))
+     (get-in m [:choices 0 :message :content])
+     (get-in m [:error :message])
+     (str resp-body))))
 
-      ;; last resort
-      (str resp-body))))
+(defn- openai-edn! [instructions user-text]
+  (let [{:keys [base-url api-key model timeout max-output-tokens]} (openai-cfg)]
+    (when-not (and (string? api-key) (seq api-key))
+      (throw (ex-info "Missing OpenAI API key" {})))
+    (let [ep (endpoint base-url "/v1/responses")
+          payload {:model model
+                   :instructions instructions
+                   :input (str user-text)
+                   :max_output_tokens max-output-tokens}
+          headers {"Authorization" (str "Bearer " api-key)
+                   "Content-Type" "application/json"}
+          {:keys [status body error]}
+          @(http/post ep {:headers headers
+                          :body (json/encode payload)
+                          :timeout timeout})]
+      (cond
+        error
+        (throw (ex-info "OpenAI request failed"
+                        {:error (str error) :endpoint ep}))
 
-(defn- openai-edn!
-  "Call OpenAI Responses API; expects EDN-only output (enforced by instructions)."
-  [instructions user-text]
-  (let [{:keys [base-url api-key model timeout max-output-tokens temperature]} (openai-cfg)
-        _ (when-not (and (string? api-key) (seq api-key))
-            (throw (ex-info "Missing OpenAI API key" {})))
-        ep (endpoint base-url "/v1/responses")
-        payload {:model model
-                 :instructions (str instructions)
-                 :input (str user-text)
-                 :temperature (double temperature)
-                 :max_output_tokens (long max-output-tokens)}
-        headers {"Authorization" (str "Bearer " api-key)
-                 "Content-Type" "application/json"}
-        {:keys [status body error]}
-        @(http/post ep {:headers headers
-                        :body (json/encode payload)
-                        :timeout timeout})]
-    (cond
-      error
-      (throw (ex-info "OpenAI request failed" {:error (str error) :endpoint ep}))
+        (or (nil? status) (not (<= 200 status 299)))
+        (throw (ex-info "OpenAI non-2xx"
+                        {:status status :body body :endpoint ep}))
 
-      (or (nil? status) (not (<= 200 status 299)))
-      (throw (ex-info "OpenAI non-2xx" {:status status :body body :endpoint ep}))
+        :else
+        (-> (extract-output-text body) str str/trim)))))
 
-      :else
-      (-> (extract-output-text body) str str/trim))))
+(defn- strip-codefences [s]
+  (-> (str (or s ""))
+      (str/replace #"(?s)^\s*```[a-zA-Z0-9_-]*\s*" "")
+      (str/replace #"(?s)\s*```\s*$" "")
+      str/trim))
 
-;; -----------------------------------------------------------------------------
-;; EDN parsing (robust)
-;; -----------------------------------------------------------------------------
-
-(defn- strip-codefences
-  "Remove ``` fences if the model wraps output."
-  [s]
-  (let [s (str (or s ""))]
-    (-> s
-        (str/replace #"(?s)^\s*```[a-zA-Z0-9_-]*\s*" "")
-        (str/replace #"(?s)\s*```\s*$" "")
-        (str/trim))))
-
-(defn- try-read-edn
-  "Try reading EDN. Returns value or nil."
-  [s]
+(defn- read-edn-or-nil [s]
   (try
     (edn/read-string {:readers {} :default (fn [_ v] v)} s)
-    (catch Throwable _ nil)))
+    (catch Throwable _
+      nil)))
 
-(defn- best-edn-map-snippet
-  "Heuristic: find a plausible EDN map from arbitrary text.
-  Strategy:
-  - collect all substrings that look like {...} (greedy-ish)
-  - prefer the longest one (usually the full map)
-  - fallback to last one"
-  [s]
-  (let [s (str (or s ""))]
-    (when-let [ms (seq (re-seq #"(?s)\{.*\}" s))]
-      (let [sorted (sort-by count ms)]
-        (or (last sorted) (last ms))))))
+(defn- balanced-map-snippets [s]
+  (let [s (str s)]
+    (loop [i 0
+           start nil
+           depth 0
+           out []]
+      (if (>= i (count s))
+        out
+        (let [ch (.charAt s i)]
+          (cond
+            (= ch \{)
+            (recur (inc i)
+                   (if (nil? start) i start)
+                   (inc depth)
+                   out)
 
-(defn- safe-edn
-  "Parse EDN map from model output. Throws with useful debug data on failure."
-  [raw]
-  (let [raw0 (str (or raw ""))
-        s (strip-codefences raw0)]
+            (= ch \})
+            (let [depth' (dec depth)]
+              (if (and start (zero? depth'))
+                (recur (inc i)
+                       nil
+                       0
+                       (conj out (subs s start (inc i))))
+                (recur (inc i) start depth' out)))
+
+            :else
+            (recur (inc i) start depth out)))))))
+
+(defn- safe-edn [raw]
+  (let [s (strip-codefences raw)]
     (or
-      (try-read-edn s)
-      (when-let [m (best-edn-map-snippet s)]
-        (try-read-edn m))
-      (throw (ex-info "Backfill extracts: model returned non-EDN"
-                      {:raw (subs raw0 0 (min 1200 (count raw0)))
-                       :hint "Expected a single EDN map like {:extract [...]}. Check instructions / model output."})))))
+     (read-edn-or-nil s)
+     (some read-edn-or-nil (reverse (balanced-map-snippets s)))
+     {:extract [] :raw raw :parse-failed? true})))
 
-;; -----------------------------------------------------------------------------
-;; Backfill logic
-;; -----------------------------------------------------------------------------
+(defn- normalize-tags [xs]
+  (->> (or xs [])
+       (map #(-> (str %) str/lower-case str/trim))
+       (remove str/blank?)
+       distinct
+       (take 8)
+       vec))
 
-(defn- chunk-transcript
-  "Turn a chunk of message tuples into a compact transcript."
-  [rows]
+(defn- normalize-extract [x]
+  (cond
+    (string? x)
+    (let [txt (str/trim x)]
+      (when (seq txt)
+        {:text txt
+         :kind :note
+         :confidence 0.65
+         :tags []}))
+
+    (map? x)
+    (let [txt (some-> (or (:text x) (:content x) (:extract/text x)) str str/trim)]
+      (when (seq txt)
+        {:text txt
+         :kind (or (:kind x) (:extract/kind x) :note)
+         :confidence (double (or (:confidence x) (:extract/confidence x) 0.75))
+         :tags (normalize-tags (or (:tags x) (:extract/tags x)))}))
+
+    :else
+    nil))
+
+(defn- normalize-extracts [xs]
+  (->> (or xs [])
+       (map normalize-extract)
+       (remove nil?)
+       vec))
+
+(defn- chunk-transcript [rows]
   (->> rows
-       (map (fn [[_ts author txt mid]]
-              (let [txt (-> (or txt "") (str/replace #"\s+" " ") str/trim)]
-                (str author " (" mid "): " txt))))
+       (map (fn [{:keys [message/id message/author-name message/content]}]
+              (let [txt (-> (or content "")
+                            (str/replace #"\s+" " ")
+                            str/trim)]
+                (str author-name " (" id "): " txt))))
        (remove str/blank?)
        (str/join "\n")))
 
 (defn- instructions []
   (str/join
    "\n"
-   ["You are generating memory extracts from a Discord chat transcript."
+   ["You generate long-term memory extracts from Discord chat transcripts."
     ""
-    "HARD RULES:"
-    "- Output EDN ONLY."
-    "- Output EXACTLY ONE EDN MAP and nothing else."
-    "- Do NOT wrap in markdown or code fences."
+    "Return EDN only if you can."
+    "Preferred shape: {:extract [...]}"
     ""
-    "Required shape:"
-    "{:extract [ ... ]}"
+    "Each extract item should be:"
+    "{:text \"one concise durable memory\" :kind :note :confidence 0.8 :tags [\"tag\" \"tag\"]}"
     ""
-    "Each extract item MUST be a map with keys:"
-    "  :text :kind :confidence :tags"
+    "Rules:"
+    "- Extract durable facts, preferences, decisions, project state, recurring ideas, and useful context."
+    "- Ignore throwaway chatter unless it explains an ongoing project or preference."
+    "- :text should be one sentence."
+    "- :kind should be :note, :fact, :decision, :todo, :preference, or :project."
+    "- :confidence should be 0.0 to 1.0."
+    "- :tags should be lowercase strings, no spaces; use hyphen."
+    "- If nothing useful exists, return {:extract []}."
     ""
-    "Constraints:"
-    "- :text is ONE concise sentence."
-    "- :kind is a keyword (e.g. :note :fact :decision :todo)."
-    "- :confidence is a number 0.0 to 1.0."
-    "- :tags is a vector of 3 to 8 strings."
-    "- tags are lowercase, no spaces (use hyphen), prefer concrete nouns/models."
-    ""
-    "If you cannot produce any good extracts, return {:extract []}."
-    ""
-    "Now read the transcript and emit EDN."]))
-
-(defn- fetch-channel-messages
-  "Return vector of [ts author content message-id] for a channel, sorted by ts."
-  [channel-id]
-  (let [dbv (db/db)]
-    (->> (dlv/q '[:find ?ts ?author ?txt ?mid
-                  :in $ ?cid
-                  :where
-                  [?e :message/channel-id ?cid]
-                  [?e :message/ts ?ts]
-                  [?e :message/author-name ?author]
-                  [?e :message/content ?txt]
-                  [?e :message/id ?mid]]
-                dbv (str channel-id))
-         (sort-by first)
-         vec)))
+    "No markdown. No prose outside the EDN map."]))
 
 (defn backfill-channel-extracts!
-  "Backfill extracts for a single channel by chunking messages and calling OpenAI.
+  "Build missing extract memories for one channel.
 
-  Args:
-    guild-id, channel-id
-
-  Options (keyword args):
-    :chunk-size (default 30)
-    :sleep-ms   (default 300)
-    :max-chunks (default nil)   ;; for testing
-    :debug?     (default false) ;; prints raw model output on parse failures
-
-  Returns:
-    {:channel-id .. :chunks .. :extract-writes ..}"
+  Safe to rerun: db/upsert-extracts! dedupes by normalized extract hash."
   [guild-id channel-id & {:keys [chunk-size sleep-ms max-chunks debug?]
-                          :or {chunk-size 30 sleep-ms 300 debug? false}}]
+                          :or {chunk-size 40
+                               sleep-ms 150
+                               debug? false}}]
   (db/ensure-conn!)
-  (let [rows (fetch-channel-messages channel-id)
+  (let [rows (db/messages-for-channel (str channel-id))
         chunks (partition-all (long chunk-size) rows)]
     (loop [i 0
            chunks-left chunks
-           writes 0]
+           writes 0
+           failed 0]
       (cond
         (empty? chunks-left)
-        {:channel-id (str channel-id) :chunks i :extract-writes writes}
+        {:channel-id (str channel-id)
+         :chunks i
+         :extract-writes writes
+         :failed failed}
 
         (and max-chunks (>= i (long max-chunks)))
-        {:channel-id (str channel-id) :chunks i :extract-writes writes}
+        {:channel-id (str channel-id)
+         :chunks i
+         :extract-writes writes
+         :failed failed
+         :stopped-at-max-chunks true}
 
         :else
         (let [chunk (first chunks-left)
               transcript (chunk-transcript chunk)
-              packet {:channel-id (str channel-id)
-                      :guild-id (str guild-id)
-                      :transcript transcript}
-              raw (openai-edn! (instructions) (pr-str packet))
-              m (try
-                  (safe-edn raw)
-                  (catch Throwable t
-                    (when debug?
-                      (println "\n--- backfill-channel-extracts! EDN PARSE FAILED ---")
-                      (println (subs (str raw) 0 (min 2000 (count (str raw)))))
-                      (println "--- /EDN PARSE FAILED ---\n"))
-                    (throw t)))
-              extracts (vec (or (:extract m) []))
-              ctx {:guild-id (str guild-id)
-                   :channel-id (str channel-id)
-                   :message-id (str "backfill-chunk-" i)
-                   :packet-id (str (java.util.UUID/randomUUID))
-                   :model (str (:model (openai-cfg)))}
-              ok (when (seq extracts)
-                   (db/upsert-extracts! ctx extracts))]
-          (when (pos? (long sleep-ms)) (Thread/sleep (long sleep-ms)))
-          (recur (inc i)
-                 (rest chunks-left)
-                 (+ writes (if ok 1 0))))))))
+              packet {:guild-id (str guild-id)
+                      :channel-id (str channel-id)
+                      :chunk i
+                      :transcript transcript}]
+          (try
+            (let [raw (openai-edn! (instructions) (pr-str packet))
+                  parsed (safe-edn raw)
+                  extracts (normalize-extracts (:extract parsed))
+                  ok (when (seq extracts)
+                       (db/upsert-extracts!
+                        {:guild-id (str guild-id)
+                         :channel-id (str channel-id)
+                         :message-id (str "backfill-chunk-" i)
+                         :packet-id (str (java.util.UUID/randomUUID))
+                         :model (:model (openai-cfg))}
+                        extracts))]
+              (when (and debug? (:parse-failed? parsed))
+                (println "[extracts] parse failed; tolerated chunk" i))
+              (when (pos? (long sleep-ms))
+                (Thread/sleep (long sleep-ms)))
+              (recur (inc i)
+                     (rest chunks-left)
+                     (+ writes (if ok 1 0))
+                     failed))
+
+            (catch Throwable t
+              (println "[extracts] failed channel"
+                       channel-id
+                       "chunk"
+                       i
+                       "|"
+                       (.getMessage t)
+                       (or (ex-data t) {}))
+              (when (pos? (long sleep-ms))
+                (Thread/sleep (long sleep-ms)))
+              (recur (inc i)
+                     (rest chunks-left)
+                     writes
+                     (inc failed)))))))))
+
+(defn backfill-guild-extracts!
+  "Build extract memories for every channel in a guild."
+  [guild-id & {:keys [chunk-size sleep-ms max-chunks-per-channel debug?]
+               :or {chunk-size 40
+                    sleep-ms 150
+                    debug? false}}]
+  (db/ensure-conn!)
+  (let [channels (db/guild-channel-ids (str guild-id))]
+    (println "extract backfill channels:" (count channels))
+    (reduce
+     (fn [acc cid]
+       (println "\n=== extracts for channel" cid "===")
+       (let [res (backfill-channel-extracts!
+                  guild-id
+                  cid
+                  :chunk-size chunk-size
+                  :sleep-ms sleep-ms
+                  :max-chunks max-chunks-per-channel
+                  :debug? debug?)]
+         (println res)
+         (conj acc res)))
+     []
+     channels)))
