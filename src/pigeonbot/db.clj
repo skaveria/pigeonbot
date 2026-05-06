@@ -607,14 +607,29 @@
 (defn count-messages []
   (or (scalar "SELECT count(*) FROM messages" []) 0))
 
+(defn- fts-query
+  "Turn arbitrary user/model text into a safe SQLite FTS5 query.
+  Avoids raw punctuation like ? causing MATCH syntax errors."
+  [s]
+  (let [tokens (->> (re-seq #"[A-Za-z0-9_\-]{2,}" (str/lower-case (str (or s ""))))
+                    (map #(str/replace % #"^-+|-+$" ""))
+                    (remove str/blank?)
+                    distinct
+                    (take 12)
+                    vec)]
+    (when (seq tokens)
+      (str/join " OR " tokens))))
+
 (defn fulltext
   "Compatibility shape for old Datalevin callers:
-  returns [[message-id :message/content content] ...] first, then extracts."
+  returns [[message-id :message/content content] ...] first, then extracts.
+
+  SQLite FTS5 requires query syntax, so raw user/model strings are sanitized first."
   ([q] (fulltext q {}))
   ([q opts]
    (let [limit (long (or (:limit opts) 50))
-         q (str (or q ""))]
-     (if (str/blank? q)
+         safe-q (fts-query q)]
+     (if (str/blank? safe-q)
        []
        (vec
         (concat
@@ -624,7 +639,7 @@
            JOIN messages m ON m.message_id = f.message_id
            WHERE messages_fts MATCH ?
            LIMIT ?"
-          [q limit]
+          [safe-q limit]
           (fn [^ResultSet rs]
             [(.getString rs "message_id") :message/content (.getString rs "content")]))
          (query
@@ -633,7 +648,7 @@
            JOIN extracts e ON e.extract_id = f.extract_id
            WHERE extracts_fts MATCH ?
            LIMIT ?"
-          [q limit]
+          [safe-q limit]
           (fn [^ResultSet rs]
             [(.getString rs "extract_id") :extract/text (.getString rs "text")]))))))))
 
