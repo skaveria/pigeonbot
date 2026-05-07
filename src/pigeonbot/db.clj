@@ -926,7 +926,7 @@
    (fn [rs]
      {:message/id (.getString rs "message_id")
       :message/ts (.getString rs "ts")
-a      :message/guild-id (.getString rs "guild_id")
+      :message/guild-id (.getString rs "guild_id")
       :message/channel-id (.getString rs "channel_id")
       :message/author-id (.getString rs "author_id")
       :message/author-name (.getString rs "author_name")
