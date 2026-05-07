@@ -64,12 +64,11 @@
         _ (when-not (and (string? api-key) (seq api-key))
             (throw (ex-info "Missing OpenAI API key" {})))
         ep (endpoint base-url "/v1/responses")
-        payload (cond-> {:model model
-                         :instructions (str instructions)
-                         :input (str user-text)
-                         :max_output_tokens max-output-tokens}
-                  ;; Some newer models reject temperature. Only send when explicit non-nil config exists.
-                  (number? temperature) (assoc :temperature (double temperature)))
+
+        payload {:model model
+         :instructions (str instructions)
+         :input (str user-text)
+         :max_output_tokens max-output-tokens}
         headers {"Authorization" (str "Bearer " api-key)
                  "Content-Type" "application/json"}
         {:keys [status body error]}
